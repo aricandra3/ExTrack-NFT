@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: nft-floor-price-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENSEA_API_KEY
+        sync: false
