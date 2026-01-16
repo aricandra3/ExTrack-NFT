@@ -1,90 +1,64 @@
 # 🎨 NFT Floor Price Tracker Bot
 
-Bot Telegram untuk memantau floor price koleksi NFT dari OpenSea secara real-time.
+Bot Telegram untuk memantau floor price koleksi NFT dari OpenSea.
 
-## ✨ Fitur
+## 🚀 Deploy ke Koyeb (GRATIS)
 
-- 🔍 **Cek Floor Price** - Lihat floor price koleksi NFT
-- 📌 **Track Koleksi** - Pantau beberapa koleksi sekaligus
-- 🔔 **Price Alerts** - Dapatkan notifikasi ketika harga mencapai target
-- 📊 **Batch Check** - Cek harga semua koleksi yang dipantau
-
-## 🚀 Cara Setup
-
-### 1. Install Dependencies
+### Step 1: Push ke GitHub
 
 ```bash
-pip install -r requirements.txt
+cd "/Users/exsild/Documents/Ngoding/bot/bot tracker price nft"
+
+git init
+git add .
+git commit -m "NFT floor price bot"
+
+# Buat repo di GitHub, lalu:
+git remote add origin https://github.com/USERNAME/nft-bot.git
+git push -u origin main
 ```
 
-### 2. Buat Bot Telegram
+### Step 2: Setup Koyeb
 
-1. Buka Telegram dan cari [@BotFather](https://t.me/botfather)
-2. Kirim `/newbot` dan ikuti instruksi
-3. Simpan token bot yang diberikan
+1. Buka [koyeb.com](https://www.koyeb.com) → Sign up (gratis)
+2. Klik **"Create App"**
+3. Pilih **"GitHub"** sebagai deployment method
+4. Connect dan pilih repo **nft-bot**
+5. Configure:
+   - **Builder**: Dockerfile
+   - **Instance type**: Free (nano)
+   - **Regions**: Pilih yang terdekat
 
-### 3. Konfigurasi Environment
+### Step 3: Environment Variables
+
+Tambahkan di bagian **"Environment variables"**:
+
+| Variable | Value |
+|----------|-------|
+| `TELEGRAM_BOT_TOKEN` | Token dari @BotFather |
+| `OPENSEA_API_KEY` | API key OpenSea |
+
+### Step 4: Deploy
+
+1. Klik **"Deploy"**
+2. Tunggu build (~2-3 menit)
+3. Bot running 24/7! ✅
+
+## 📋 Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message |
+| `/floor <slug>` | Cek floor price |
+| `/track <slug>` | Track collection |
+| `/check` | Check all tracked |
+| `/alert <slug> <price>` | Set price alert |
+
+## 🏃 Run Locally
 
 ```bash
-# Copy template file
+pip3 install -r requirements.txt
 cp .env.example .env
-
-# Edit .env dan masukkan token bot
-TELEGRAM_BOT_TOKEN=your_bot_token_here
+# Edit .env dengan token Anda
+python3 bot.py
 ```
-
-### 4. (Opsional) OpenSea API Key
-
-Untuk rate limit yang lebih tinggi, dapatkan API key dari [OpenSea Developer Portal](https://docs.opensea.io/reference/api-keys) dan tambahkan ke `.env`:
-
-```
-OPENSEA_API_KEY=your_api_key_here
-```
-
-### 5. Jalankan Bot
-
-```bash
-python bot.py
-```
-
-## 📋 Perintah Bot
-
-| Perintah | Deskripsi | Contoh |
-|----------|-----------|--------|
-| `/start` | Tampilkan pesan selamat datang | `/start` |
-| `/floor <slug>` | Cek floor price koleksi | `/floor boredapeyachtclub` |
-| `/track <slug>` | Tambah ke daftar pantauan | `/track azuki` |
-| `/untrack <slug>` | Hapus dari pantauan | `/untrack azuki` |
-| `/list` | Lihat koleksi yang dipantau | `/list` |
-| `/check` | Cek harga semua koleksi | `/check` |
-| `/alert <slug> <price>` | Set price alert | `/alert boredapeyachtclub 50` |
-| `/alerts` | Lihat alert aktif | `/alerts` |
-
-## 💡 Cara Menemukan Collection Slug
-
-Collection slug adalah bagian dari URL OpenSea. Contoh:
-- URL: `https://opensea.io/collection/boredapeyachtclub`
-- Slug: `boredapeyachtclub`
-
-## 📁 Struktur Project
-
-```
-bot-tracker-price-nft/
-├── bot.py           # Main bot application
-├── opensea_api.py   # OpenSea API integration
-├── database.py      # SQLite database handler
-├── config.py        # Configuration settings
-├── requirements.txt # Python dependencies
-├── .env.example     # Environment template
-└── README.md        # This file
-```
-
-## ⚠️ Catatan Penting
-
-- OpenSea API memiliki rate limit. Jika terlalu banyak request, Anda mungkin perlu menunggu beberapa saat.
-- Price alerts dicek secara otomatis setiap 5 menit.
-- Data tracking disimpan di SQLite database lokal (`nft_tracker.db`).
-
-## 📜 License
-
-MIT License

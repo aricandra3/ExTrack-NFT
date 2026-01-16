@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -11,6 +14,26 @@ from telegram.constants import ParseMode
 from config import TELEGRAM_BOT_TOKEN, ALERT_CHECK_INTERVAL
 from opensea_api import opensea_api
 from database import db
+
+
+# Simple health check HTTP server for Koyeb
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK - NFT Floor Price Bot is running')
+    
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP logs
+
+
+def run_health_server():
+    """Run health check server in background thread"""
+    port = int(os.environ.get('PORT', 8000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"🏥 Health check server running on port {port}")
+    server.serve_forever()
 
 # Enable logging
 logging.basicConfig(
@@ -304,6 +327,10 @@ def main() -> None:
         print("❌ Error: TELEGRAM_BOT_TOKEN tidak ditemukan!")
         print("Silakan copy .env.example ke .env dan isi dengan token bot Anda.")
         return
+    
+    # Start health check server in background thread (for Koyeb)
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
