@@ -15,5 +15,14 @@ OPENSEA_API_BASE_URL = "https://api.opensea.io/api/v2"
 # Check interval for price alerts (in seconds)
 ALERT_CHECK_INTERVAL = 300  # 5 minutes
 
+# Price history recording interval (in seconds)
+PRICE_HISTORY_INTERVAL = 3600  # 1 hour
+
+# Volume spike detection multiplier (e.g., 2.0 = 2x average)
+VOLUME_SPIKE_MULTIPLIER = 2.0
+
+# Etherscan API Key for gas price
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+
 # Database file
 DATABASE_FILE = "nft_tracker.db"

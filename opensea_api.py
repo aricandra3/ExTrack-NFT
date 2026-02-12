@@ -107,6 +107,59 @@ class OpenSeaAPI:
 📈 **Total Volume:** {total_volume:,.2f} {floor_price_symbol}
 """
         return message.strip()
+    
+    def format_volume_stats(self, stats: Dict[str, Any], collection_info: Optional[Dict[str, Any]] = None,
+                            previous_volume: Optional[float] = None) -> str:
+        """Format volume and sales stats into a readable message"""
+        if stats is None:
+            return "❌ Error: Gagal mengambil data"
+        
+        if "error" in stats:
+            return f"❌ Error: {stats['error']}"
+        
+        total = stats.get("total", {})
+        intervals = stats.get("intervals", [])
+        
+        # Get 24h data from intervals if available
+        volume_24h = 0
+        sales_24h = 0
+        avg_price_24h = 0
+        
+        for interval in intervals:
+            if interval.get("interval") == "one_day":
+                volume_24h = interval.get("volume", 0) or 0
+                sales_24h = interval.get("sales", 0) or 0
+                avg_price_24h = interval.get("average_price", 0) or 0
+                break
+        
+        # If no interval data, use total data
+        if volume_24h == 0:
+            volume_24h = total.get("volume", 0) or 0
+            sales_24h = total.get("sales", 0) or 0
+        
+        floor_price_symbol = total.get("floor_price_symbol", "ETH")
+        
+        # Collection name from info if available
+        name = "Collection"
+        if collection_info and "name" in collection_info:
+            name = collection_info["name"]
+        
+        # Calculate volume change if previous volume is provided
+        volume_change_str = ""
+        if previous_volume and previous_volume > 0:
+            change_pct = ((volume_24h - previous_volume) / previous_volume) * 100
+            emoji = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
+            sign = "+" if change_pct > 0 else ""
+            volume_change_str = f"\n📊 **Volume Change:** {sign}{change_pct:.1f}% {emoji}"
+        
+        message = f"""
+📊 **Volume Stats: {name}**
+
+💎 **Volume 24h:** {volume_24h:,.4f} {floor_price_symbol}
+🛒 **Sales 24h:** {sales_24h}
+💵 **Avg Price:** {avg_price_24h:,.4f} {floor_price_symbol}{volume_change_str}
+"""
+        return message.strip()
 
 
 # Singleton instance
