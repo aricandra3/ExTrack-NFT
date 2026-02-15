@@ -1,58 +1,59 @@
 # 🎨 NFT Floor Price Tracker Bot
 
-Bot Telegram untuk memantau floor price koleksi NFT dari OpenSea.
+Bot Telegram untuk memantau NFT, portfolio, dan gas Ethereum.
 
 ## 🚀 Deploy ke Koyeb (GRATIS)
 
 ### Step 1: Push ke GitHub
 
 ```bash
-cd "/Users/exsild/Documents/Ngoding/bot/bot tracker price nft"
-
-git init
 git add .
-git commit -m "NFT floor price bot"
-
-# Buat repo di GitHub, lalu:
-git remote add origin https://github.com/USERNAME/nft-bot.git
-git push -u origin main
+git commit -m "Add portfolio, volume, gas features"
+git push origin main
 ```
 
-### Step 2: Setup Koyeb
+### Step 2: Environment Variables
 
-1. Buka [koyeb.com](https://www.koyeb.com) → Sign up (gratis)
-2. Klik **"Create App"**
-3. Pilih **"GitHub"** sebagai deployment method
-4. Connect dan pilih repo **nft-bot**
-5. Configure:
-   - **Builder**: Dockerfile
-   - **Instance type**: Free (nano)
-   - **Regions**: Pilih yang terdekat
-
-### Step 3: Environment Variables
-
-Tambahkan di bagian **"Environment variables"**:
+Tambahkan di Koyeb **"Environment variables"**:
 
 | Variable | Value |
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Token dari @BotFather |
-| `OPENSEA_API_KEY` | API key OpenSea |
-
-### Step 4: Deploy
-
-1. Klik **"Deploy"**
-2. Tunggu build (~2-3 menit)
-3. Bot running 24/7! ✅
+| `OPENSEA_API_KEY` | API key OpenSea (opsional) |
+| `ETHERSCAN_API_KEY` | API key Etherscan (untuk gas) |
 
 ## 📋 Commands
 
+### Floor Price & Tracking
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message |
-| `/floor <slug>` | Cek floor price |
+| `/floor <slug>` | Cek floor price koleksi |
 | `/track <slug>` | Track collection |
-| `/check` | Check all tracked |
-| `/alert <slug> <price>` | Set price alert |
+| `/untrack <slug>` | Untrack collection |
+| `/list` | Lihat semua tracked |
+| `/check` | Check all tracked prices |
+
+### Alerts
+| Command | Description |
+|---------|-------------|
+| `/alert <slug> <price>` | Alert harga di bawah target |
+| `/palert <slug> <persen> [up/down/both]` | Alert perubahan % |
+| `/valert <slug> [multiplier]` | Alert volume spike |
+| `/gasalert <gwei> [below/above]` | Alert gas price |
+| `/alerts` | Lihat semua alert aktif |
+
+### Portfolio
+| Command | Description |
+|---------|-------------|
+| `/addnft <slug> <qty> <buy_price>` | Tambah NFT ke portfolio |
+| `/removenft <slug>` | Hapus dari portfolio |
+| `/portfolio` | Lihat P/L dan ROI |
+
+### Gas & Volume
+| Command | Description |
+|---------|-------------|
+| `/gas` | Cek harga gas saat ini |
+| `/volume <slug>` | Cek volume 24h |
 
 ## 🏃 Run Locally
 
@@ -62,3 +63,4 @@ cp .env.example .env
 # Edit .env dengan token Anda
 python3 bot.py
 ```
+
