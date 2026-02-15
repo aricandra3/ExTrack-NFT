@@ -9,7 +9,7 @@ class GasAPI:
     
     def __init__(self):
         self.api_key = ETHERSCAN_API_KEY
-        self.base_url = "https://api.etherscan.io/api"
+        self.base_url = "https://api.etherscan.io/v2/api"
         self.timeout = aiohttp.ClientTimeout(total=10, connect=5)
     
     async def get_gas_price(self) -> Optional[Dict[str, Any]]:
@@ -20,7 +20,7 @@ class GasAPI:
         if not self.api_key:
             return {"error": "Etherscan API key belum dikonfigurasi. Tambahkan ETHERSCAN_API_KEY ke .env"}
         
-        url = f"{self.base_url}?module=gastracker&action=gasoracle&apikey={self.api_key}"
+        url = f"{self.base_url}?chainid=1&module=gastracker&action=gasoracle&apikey={self.api_key}"
         
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
@@ -59,26 +59,14 @@ class GasAPI:
         fast = gas_data.get("fast", 0)
         base_fee = gas_data.get("base_fee", 0)
         
-        # Estimate USD cost for a standard 21000 gas transfer
-        # Using approximate ETH price of $2500 (this is just an estimate)
-        eth_price_usd = 2500
-        gas_limit = 21000
-        
-        def gwei_to_usd(gwei):
-            eth_cost = (gwei * gas_limit) / 1e9
-            return eth_cost * eth_price_usd
-        
         message = f"""
 ⛽ **Ethereum Gas Prices**
 
-🐢 **Low:** {low:.1f} gwei (~${gwei_to_usd(low):.2f})
-🚶 **Average:** {average:.1f} gwei (~${gwei_to_usd(average):.2f})
-🚀 **Fast:** {fast:.1f} gwei (~${gwei_to_usd(fast):.2f})
+🐢 **Low:** {low:.2f} gwei
+🚶 **Average:** {average:.2f} gwei
+🚀 **Fast:** {fast:.2f} gwei
 
 📊 **Base Fee:** {base_fee:.2f} gwei
-
-_💡 Estimasi untuk transfer standar (21,000 gas)_
-_Harga ETH: ~$2,500_
 """
         return message.strip()
 

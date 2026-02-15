@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
@@ -82,6 +83,8 @@ def alerts_menu_keyboard():
          InlineKeyboardButton("📈 % Alert", callback_data="cmd_palert")],
         [InlineKeyboardButton("📢 Volume Alert", callback_data="cmd_valert"),
          InlineKeyboardButton("🔔 Lihat Alerts", callback_data="cmd_alerts")],
+        [InlineKeyboardButton("🗓 Mint Reminder", callback_data="cmd_addmint"),
+         InlineKeyboardButton("📋 Lihat Mints", callback_data="cmd_mints")],
         [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -172,6 +175,8 @@ INPUT_PROMPTS = {
     "addnft": "➕ *Tambah NFT*\n\nKetik slug, jumlah, dan harga beli:\n\n_Format:_ `slug jumlah buy_price`\n_Contoh:_ `azuki 2 15.5`",
     "removenft": "➖ *Hapus NFT*\n\nKetik slug koleksi yang ingin dihapus dari portofolio:\n\n_Contoh:_ `azuki`",
     "gasalert": "⏰ *Gas Alert*\n\nKetik target gwei dan tipe:\n\n_Format:_ `gwei [below/above]`\n_Contoh:_ `25 below`",
+    "addmint": "🗓 *Mint Reminder*\n\nKetik info mint NFT:\n\n_Format:_ `nama | harga | YYYY-MM-DD HH:MM | link`\n_Contoh:_ `Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`",
+    "removemint": "🗑 *Hapus Mint Reminder*\n\nKetik ID reminder yang ingin dihapus:\n\n_Cek ID di_ `/mints`",
 }
 
 
@@ -378,6 +383,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if data == "cmd_mints":
+        reminders = db.get_mint_reminders(user_id)
+        if not reminders:
+            text = "🗓 Anda belum memiliki mint reminder."
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Tambah Reminder", callback_data="cmd_addmint"),
+                 InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts")]
+            ])
+        else:
+            text = "🗓 *Mint Reminders Aktif:*\n\n"
+            for rid, name, price, mdate, link in reminders:
+                text += f"*#{rid} — {name}*\n"
+                text += f"├ 💰 Price: {price}\n"
+                text += f"├ 📅 Date: `{mdate}`\n"
+                if link:
+                    text += f"└ 🔗 [Mint Link]({link})\n"
+                else:
+                    text += f"└ 🔗 No link\n"
+                text += "\n"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Tambah", callback_data="cmd_addmint"),
+                 InlineKeyboardButton("🗑 Hapus", callback_data="cmd_removemint")],
+                [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts"),
+                 InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+            ])
+        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+                                      disable_web_page_preview=True)
         return
 
     # ---- Arg-required commands: prompt for input ----
@@ -674,6 +708,65 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
+    if action == "addmint":
+        parts = text.split("|")
+        if len(parts) < 3:
+            await update.message.reply_text(
+                "❌ Format salah.\n\n"
+                "_Format:_ `nama | harga | YYYY-MM-DD HH:MM | link`\n"
+                "_Contoh:_ `Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        nft_name = parts[0].strip()
+        mint_price = parts[1].strip()
+        date_str = parts[2].strip()
+        mint_link = parts[3].strip() if len(parts) > 3 else ""
+        try:
+            mint_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Format tanggal salah.\nGunakan: `YYYY-MM-DD HH:MM`\n_Contoh:_ `2026-03-01 14:00`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        success = db.add_mint_reminder(user_id, nft_name, mint_price, date_str, mint_link)
+        if success:
+            msg = (f"🗓 Mint Reminder berhasil ditambahkan!\n\n"
+                   f"NFT: *{nft_name}*\n"
+                   f"Price: {mint_price}\n"
+                   f"Date: `{date_str}`\n")
+            if mint_link:
+                msg += f"Link: {mint_link}\n"
+            msg += "\n_Bot akan mengingatkan 30 menit & 5 menit sebelum mint._"
+        else:
+            msg = "❌ Gagal menambahkan reminder."
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Lihat Reminders", callback_data="cmd_mints"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+        ])
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+                                        disable_web_page_preview=True)
+        return
+
+    if action == "removemint":
+        try:
+            reminder_id = int(text.strip())
+        except ValueError:
+            await update.message.reply_text("❌ ID harus berupa angka. Cek ID di /mints")
+            return
+        success = db.remove_mint_reminder(user_id, reminder_id)
+        if success:
+            msg = f"✅ Reminder #{reminder_id} berhasil dihapus."
+        else:
+            msg = f"❌ Reminder #{reminder_id} tidak ditemukan."
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Lihat Reminders", callback_data="cmd_mints"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+        ])
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
 
 async def post_init(application: Application) -> None:
     """Set bot commands for Telegram's built-in menu."""
@@ -694,6 +787,9 @@ async def post_init(application: Application) -> None:
         BotCommand("portfolio", "💼 Lihat portofolio"),
         BotCommand("gas", "⛽ Cek gas price"),
         BotCommand("gasalert", "⏰ Set gas alert"),
+        BotCommand("addmint", "🗓 Tambah mint reminder"),
+        BotCommand("mints", "📋 Lihat mint reminders"),
+        BotCommand("removemint", "🗑 Hapus mint reminder"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -1457,6 +1553,172 @@ async def record_price_history(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error(f"Error recording price history for {collection_slug}: {e}")
 
 
+# ============== Mint Reminder Commands ==============
+
+async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a mint reminder."""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Format: `/addmint nama | harga | YYYY-MM-DD HH:MM | link`\n\n"
+            "Contoh:\n"
+            "`Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`\n\n"
+            "_Link bersifat opsional._",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    text = " ".join(context.args)
+    parts = text.split("|")
+    
+    if len(parts) < 3:
+        await update.message.reply_text(
+            "❌ Format salah. Pisahkan dengan `|`\n\n"
+            "_Format:_ `nama | harga | YYYY-MM-DD HH:MM | link`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    nft_name = parts[0].strip()
+    mint_price = parts[1].strip()
+    date_str = parts[2].strip()
+    mint_link = parts[3].strip() if len(parts) > 3 else ""
+    
+    try:
+        mint_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Format tanggal salah.\nGunakan: `YYYY-MM-DD HH:MM`\n_Contoh:_ `2026-03-01 14:00`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    user_id = update.effective_user.id
+    success = db.add_mint_reminder(user_id, nft_name, mint_price, date_str, mint_link)
+    
+    if success:
+        msg = (f"🗓 Mint Reminder berhasil ditambahkan!\n\n"
+               f"NFT: *{nft_name}*\n"
+               f"Price: {mint_price}\n"
+               f"Date: `{date_str}`\n")
+        if mint_link:
+            msg += f"Link: {mint_link}\n"
+        msg += "\n_Bot akan mengingatkan 30 menit & 5 menit sebelum mint._"
+    else:
+        msg = "❌ Gagal menambahkan reminder."
+    
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+async def mints_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all active mint reminders."""
+    user_id = update.effective_user.id
+    reminders = db.get_mint_reminders(user_id)
+    
+    if not reminders:
+        await update.message.reply_text(
+            "🗓 Anda belum memiliki mint reminder.\n"
+            "Gunakan `/addmint` untuk menambahkan.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    message = "🗓 **Mint Reminders Aktif:**\n\n"
+    for rid, name, price, mdate, link in reminders:
+        message += f"**#{rid} — {name}**\n"
+        message += f"├ 💰 Price: {price}\n"
+        message += f"├ 📅 Date: `{mdate}`\n"
+        if link:
+            message += f"└ 🔗 [Mint Link]({link})\n"
+        else:
+            message += f"└ 🔗 No link\n"
+        message += "\n"
+    
+    message += "_Hapus dengan_ `/removemint <id>`"
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+async def removemint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a mint reminder."""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Format: `/removemint <id>`\n"
+            "Cek ID reminder di `/mints`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    try:
+        reminder_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ ID harus berupa angka. Cek ID di /mints")
+        return
+    
+    user_id = update.effective_user.id
+    success = db.remove_mint_reminder(user_id, reminder_id)
+    
+    if success:
+        await update.message.reply_text(f"✅ Reminder #{reminder_id} berhasil dihapus.")
+    else:
+        await update.message.reply_text(f"❌ Reminder #{reminder_id} tidak ditemukan.")
+
+
+async def check_mint_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Background job to check and send mint reminders."""
+    reminders = db.get_upcoming_reminders()
+    now = datetime.now()
+    
+    for rid, user_id, nft_name, mint_price, mint_date_str, mint_link, reminded_30, reminded_5 in reminders:
+        try:
+            mint_dt = datetime.strptime(mint_date_str, "%Y-%m-%d %H:%M")
+            time_until = mint_dt - now
+            minutes_until = time_until.total_seconds() / 60
+            
+            # Deactivate if mint time has already passed
+            if minutes_until < -5:
+                db.deactivate_mint_reminder(rid)
+                continue
+            
+            should_send = False
+            reminder_type = ""
+            
+            # 30 minute reminder
+            if not reminded_30 and 25 <= minutes_until <= 35:
+                should_send = True
+                reminder_type = "30min"
+                time_text = "⏰ **30 menit lagi!**"
+            
+            # 5 minute reminder
+            elif not reminded_5 and 0 <= minutes_until <= 8:
+                should_send = True
+                reminder_type = "5min"
+                time_text = "🚨 **5 menit lagi!**"
+            
+            if should_send:
+                message = (
+                    f"🗓 **Mint Reminder!**\n\n"
+                    f"{time_text}\n\n"
+                    f"NFT: **{nft_name}**\n"
+                    f"Price: {mint_price}\n"
+                    f"Waktu: `{mint_date_str}`\n"
+                )
+                if mint_link:
+                    message += f"\n🔗 [Mint Link]({mint_link})"
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_web_page_preview=True
+                    )
+                    db.mark_reminded(rid, reminder_type)
+                except Exception as e:
+                    logger.error(f"Failed to send mint reminder to user {user_id}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Error checking mint reminder {rid}: {e}")
+
+
 def main() -> None:
     """Start the bot."""
     if not TELEGRAM_BOT_TOKEN:
@@ -1489,6 +1751,9 @@ def main() -> None:
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("gas", gas_command))
     application.add_handler(CommandHandler("gasalert", gasalert_command))
+    application.add_handler(CommandHandler("addmint", addmint_command))
+    application.add_handler(CommandHandler("mints", mints_command))
+    application.add_handler(CommandHandler("removemint", removemint_command))
     
     # Add callback handler for inline keyboard buttons
     application.add_handler(CallbackQueryHandler(button_handler))
@@ -1504,11 +1769,12 @@ def main() -> None:
     job_queue.run_repeating(check_percentage_alerts, interval=ALERT_CHECK_INTERVAL, first=90)
     job_queue.run_repeating(check_volume_alerts, interval=ALERT_CHECK_INTERVAL, first=120)
     job_queue.run_repeating(check_gas_alerts, interval=ALERT_CHECK_INTERVAL, first=150)
+    job_queue.run_repeating(check_mint_reminders, interval=60, first=30)
     job_queue.run_repeating(record_price_history, interval=PRICE_HISTORY_INTERVAL, first=300)
     
     # Start the bot
     print("🚀 Bot started! Press Ctrl+C to stop.")
-    print("📊 New features: Percentage alerts, Volume alerts, Portofolio, Gas alerts")
+    print("📊 Features: Price alerts, % alerts, Volume alerts, Portfolio, Gas alerts, Mint reminders")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

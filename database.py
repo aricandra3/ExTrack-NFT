@@ -114,6 +114,22 @@ class Database:
             )
         """)
         
+        # Table for mint reminders
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mint_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                nft_name TEXT NOT NULL,
+                mint_price TEXT NOT NULL,
+                mint_date TEXT NOT NULL,
+                mint_link TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                reminded_30min INTEGER DEFAULT 0,
+                reminded_5min INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         conn.close()
     
@@ -536,6 +552,101 @@ class Database:
         )
         conn.commit()
         conn.close()
+    
+    # ============== Mint Reminder Methods ==============
+    
+    def add_mint_reminder(self, user_id: int, nft_name: str, mint_price: str,
+                          mint_date: str, mint_link: str = "") -> bool:
+        """Add a mint reminder"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                """INSERT INTO mint_reminders (user_id, nft_name, mint_price, mint_date, mint_link)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user_id, nft_name, mint_price, mint_date, mint_link)
+            )
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+    
+    def get_mint_reminders(self, user_id: int) -> List[Tuple]:
+        """Get all active mint reminders for a user"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            """SELECT id, nft_name, mint_price, mint_date, mint_link 
+               FROM mint_reminders WHERE user_id = ? AND is_active = 1
+               ORDER BY mint_date ASC""",
+            (user_id,)
+        )
+        results = cursor.fetchall()
+        conn.close()
+        return results
+    
+    def get_upcoming_reminders(self) -> List[Tuple]:
+        """Get all active reminders for background checking"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            """SELECT id, user_id, nft_name, mint_price, mint_date, mint_link, 
+                      reminded_30min, reminded_5min
+               FROM mint_reminders WHERE is_active = 1"""
+        )
+        results = cursor.fetchall()
+        conn.close()
+        return results
+    
+    def mark_reminded(self, reminder_id: int, reminder_type: str):
+        """Mark a reminder as sent (30min or 5min)"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        if reminder_type == "30min":
+            cursor.execute(
+                "UPDATE mint_reminders SET reminded_30min = 1 WHERE id = ?",
+                (reminder_id,)
+            )
+        elif reminder_type == "5min":
+            cursor.execute(
+                "UPDATE mint_reminders SET reminded_5min = 1 WHERE id = ?",
+                (reminder_id,)
+            )
+        
+        conn.commit()
+        conn.close()
+    
+    def deactivate_mint_reminder(self, reminder_id: int):
+        """Deactivate a mint reminder after it has passed"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE mint_reminders SET is_active = 0 WHERE id = ?",
+            (reminder_id,)
+        )
+        conn.commit()
+        conn.close()
+    
+    def remove_mint_reminder(self, user_id: int, reminder_id: int) -> bool:
+        """Remove a mint reminder"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "DELETE FROM mint_reminders WHERE id = ? AND user_id = ?",
+            (reminder_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
 
 
 # Singleton instance
