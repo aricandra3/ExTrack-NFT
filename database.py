@@ -39,11 +39,23 @@ class Database:
                 target_price REAL NOT NULL,
                 alert_type TEXT DEFAULT 'below',
                 is_active INTEGER DEFAULT 1,
+                is_recurring INTEGER DEFAULT 0,
+                current_price_at_set REAL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 triggered_at TIMESTAMP,
-                UNIQUE(user_id, collection_slug, target_price)
+                UNIQUE(user_id, collection_slug, target_price, alert_type)
             )
         """)
+
+        # Migrate: add columns if missing
+        try:
+            cursor.execute("ALTER TABLE price_alerts ADD COLUMN is_recurring INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE price_alerts ADD COLUMN current_price_at_set REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         
         # Table for price history (for percentage calculations)
         cursor.execute("""
@@ -67,11 +79,23 @@ class Database:
                 percentage_threshold REAL NOT NULL,
                 direction TEXT DEFAULT 'both',
                 is_active INTEGER DEFAULT 1,
+                is_recurring INTEGER DEFAULT 0,
+                reference_price REAL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 triggered_at TIMESTAMP,
                 UNIQUE(user_id, collection_slug, percentage_threshold, direction)
             )
         """)
+
+        # Migrate: add columns if missing
+        try:
+            cursor.execute("ALTER TABLE percentage_alerts ADD COLUMN is_recurring INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE percentage_alerts ADD COLUMN reference_price REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         
         # Table for volume spike alerts
         cursor.execute("""
@@ -193,16 +217,19 @@ class Database:
     
     # Price Alerts Methods
     def add_price_alert(self, user_id: int, collection_slug: str, target_price: float, 
-                        alert_type: str = "below") -> bool:
+                        alert_type: str = "below", is_recurring: bool = False,
+                        current_price: float = 0) -> bool:
         """Add a price alert for a collection"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
             cursor.execute(
-                """INSERT INTO price_alerts (user_id, collection_slug, target_price, alert_type) 
-                   VALUES (?, ?, ?, ?)""",
-                (user_id, collection_slug.lower(), target_price, alert_type)
+                """INSERT INTO price_alerts 
+                   (user_id, collection_slug, target_price, alert_type, is_recurring, current_price_at_set) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user_id, collection_slug.lower(), target_price, alert_type, 
+                 1 if is_recurring else 0, current_price)
             )
             conn.commit()
             return True
@@ -225,14 +252,66 @@ class Database:
         conn.close()
         
         return affected > 0
+
+    def remove_alert_by_id(self, user_id: int, alert_id: int) -> bool:
+        """Remove a specific alert by ID"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM price_alerts WHERE id = ? AND user_id = ?",
+            (alert_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+
+    def remove_percent_alert_by_id(self, user_id: int, alert_id: int) -> bool:
+        """Remove a specific percentage alert by ID"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM percentage_alerts WHERE id = ? AND user_id = ?",
+            (alert_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+
+    def remove_volume_alert_by_id(self, user_id: int, alert_id: int) -> bool:
+        """Remove a specific volume alert by ID"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM volume_alerts WHERE id = ? AND user_id = ?",
+            (alert_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
+
+    def remove_gas_alert_by_id(self, user_id: int, alert_id: int) -> bool:
+        """Remove a specific gas alert by ID"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM gas_alerts WHERE id = ? AND user_id = ?",
+            (alert_id, user_id)
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
     
-    def get_user_alerts(self, user_id: int) -> List[Tuple[str, float, str]]:
-        """Get all active alerts for a user"""
+    def get_user_alerts(self, user_id: int) -> List[Tuple]:
+        """Get all active alerts for a user with IDs"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT collection_slug, target_price, alert_type 
+            """SELECT id, collection_slug, target_price, alert_type, is_recurring 
                FROM price_alerts WHERE user_id = ? AND is_active = 1""",
             (user_id,)
         )
@@ -256,15 +335,30 @@ class Database:
         return alerts
     
     def deactivate_alert(self, user_id: int, collection_slug: str, target_price: float):
-        """Mark an alert as triggered/inactive"""
+        """Mark an alert as triggered/inactive. If recurring, reset reference price instead."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # Check if recurring
         cursor.execute(
-            """UPDATE price_alerts SET is_active = 0, triggered_at = CURRENT_TIMESTAMP 
-               WHERE user_id = ? AND collection_slug = ? AND target_price = ?""",
+            """SELECT is_recurring FROM price_alerts 
+               WHERE user_id = ? AND collection_slug = ? AND target_price = ? AND is_active = 1""",
             (user_id, collection_slug.lower(), target_price)
         )
+        row = cursor.fetchone()
+        if row and row[0] == 1:
+            # Recurring: update triggered_at but keep active
+            cursor.execute(
+                """UPDATE price_alerts SET triggered_at = CURRENT_TIMESTAMP 
+                   WHERE user_id = ? AND collection_slug = ? AND target_price = ?""",
+                (user_id, collection_slug.lower(), target_price)
+            )
+        else:
+            cursor.execute(
+                """UPDATE price_alerts SET is_active = 0, triggered_at = CURRENT_TIMESTAMP 
+                   WHERE user_id = ? AND collection_slug = ? AND target_price = ?""",
+                (user_id, collection_slug.lower(), target_price)
+            )
         conn.commit()
         conn.close()
     
@@ -320,16 +414,19 @@ class Database:
     # ============== Percentage Alerts Methods ==============
     
     def add_percentage_alert(self, user_id: int, collection_slug: str, 
-                              percentage: float, direction: str = "both") -> bool:
-        """Add a percentage-based alert"""
+                              percentage: float, direction: str = "both",
+                              is_recurring: bool = False, reference_price: float = 0) -> bool:
+        """Add a percentage-based alert with reference price"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
             cursor.execute(
-                """INSERT INTO percentage_alerts (user_id, collection_slug, percentage_threshold, direction)
-                   VALUES (?, ?, ?, ?)""",
-                (user_id, collection_slug.lower(), percentage, direction)
+                """INSERT INTO percentage_alerts 
+                   (user_id, collection_slug, percentage_threshold, direction, is_recurring, reference_price)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user_id, collection_slug.lower(), percentage, direction,
+                 1 if is_recurring else 0, reference_price)
             )
             conn.commit()
             return True
@@ -339,12 +436,12 @@ class Database:
             conn.close()
     
     def get_percentage_alerts(self, user_id: int) -> List[Tuple]:
-        """Get all active percentage alerts for a user"""
+        """Get all active percentage alerts for a user with IDs"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT collection_slug, percentage_threshold, direction 
+            """SELECT id, collection_slug, percentage_threshold, direction, is_recurring 
                FROM percentage_alerts WHERE user_id = ? AND is_active = 1""",
             (user_id,)
         )
@@ -358,7 +455,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT user_id, collection_slug, percentage_threshold, direction 
+            """SELECT user_id, collection_slug, percentage_threshold, direction, reference_price, is_recurring 
                FROM percentage_alerts WHERE is_active = 1"""
         )
         results = cursor.fetchall()
@@ -366,14 +463,45 @@ class Database:
         return results
     
     def deactivate_percentage_alert(self, user_id: int, collection_slug: str, percentage: float):
-        """Mark a percentage alert as triggered"""
+        """Mark a percentage alert as triggered. If recurring, update ref price."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # Check if recurring
         cursor.execute(
-            """UPDATE percentage_alerts SET is_active = 0, triggered_at = CURRENT_TIMESTAMP 
-               WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ?""",
+            """SELECT is_recurring FROM percentage_alerts 
+               WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ? AND is_active = 1""",
             (user_id, collection_slug.lower(), percentage)
+        )
+        row = cursor.fetchone()
+        if row and row[0] == 1:
+            # Recurring: update ref price to current and keep active
+            from opensea_api import opensea_api as _api
+            import asyncio
+            # Just update triggered_at, reference_price will be updated by checker
+            cursor.execute(
+                """UPDATE percentage_alerts SET triggered_at = CURRENT_TIMESTAMP 
+                   WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ?""",
+                (user_id, collection_slug.lower(), percentage)
+            )
+        else:
+            cursor.execute(
+                """UPDATE percentage_alerts SET is_active = 0, triggered_at = CURRENT_TIMESTAMP 
+                   WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ?""",
+                (user_id, collection_slug.lower(), percentage)
+            )
+        conn.commit()
+        conn.close()
+
+    def update_percentage_alert_ref_price(self, user_id: int, collection_slug: str, 
+                                          percentage: float, new_ref_price: float):
+        """Update reference price for a recurring percentage alert after trigger."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE percentage_alerts SET reference_price = ? 
+               WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ? AND is_active = 1""",
+            (new_ref_price, user_id, collection_slug.lower(), percentage)
         )
         conn.commit()
         conn.close()
@@ -400,12 +528,12 @@ class Database:
             conn.close()
     
     def get_volume_alerts(self, user_id: int) -> List[Tuple]:
-        """Get all active volume alerts for a user"""
+        """Get all active volume alerts for a user with IDs"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT collection_slug, spike_multiplier 
+            """SELECT id, collection_slug, spike_multiplier 
                FROM volume_alerts WHERE user_id = ? AND is_active = 1""",
             (user_id,)
         )
@@ -514,12 +642,12 @@ class Database:
             conn.close()
     
     def get_gas_alerts(self, user_id: int) -> List[Tuple]:
-        """Get all active gas alerts for a user"""
+        """Get all active gas alerts for a user with IDs"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT target_gwei, alert_type 
+            """SELECT id, target_gwei, alert_type 
                FROM gas_alerts WHERE user_id = ? AND is_active = 1""",
             (user_id,)
         )
