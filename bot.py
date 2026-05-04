@@ -22,13 +22,22 @@ from price_api import price_api
 from database import db
 
 
-# Simple health check HTTP server for Koyeb
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def _send_ok(self, method):
+        content = b'OK - NFT Floor Price Bot is running'
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-Length', str(len(content)))
+        self.send_header('Connection', 'close')
         self.end_headers()
-        self.wfile.write(b'OK - NFT Floor Price Bot is running')
+        if method == 'GET':
+            self.wfile.write(content)
+
+    def do_GET(self):
+        self._send_ok('GET')
+        
+    def do_HEAD(self):
+        self._send_ok('HEAD')
     
     def log_message(self, format, *args):
         pass  # Suppress HTTP logs
