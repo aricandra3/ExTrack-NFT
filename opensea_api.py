@@ -99,12 +99,12 @@ class OpenSeaAPI:
             total_supply_str = str(total_supply)
         
         message = f"""
-📊 **{name}**
+📊 *{name}*
 
-💰 **Floor Price:** {floor_price:.4f} {floor_price_symbol}
-👥 **Owners:** {num_owners_str}
-📦 **Total Supply:** {total_supply_str}
-📈 **Total Volume:** {total_volume:,.2f} {floor_price_symbol}
+💰 *Floor Price:* {floor_price:.4f} {floor_price_symbol}
+👥 *Owners:* {num_owners_str}
+📦 *Total Supply:* {total_supply_str}
+📈 *Total Volume:* {total_volume:,.2f} {floor_price_symbol}
 """
         return message.strip()
     
@@ -150,14 +150,14 @@ class OpenSeaAPI:
             change_pct = ((volume_24h - previous_volume) / previous_volume) * 100
             emoji = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
             sign = "+" if change_pct > 0 else ""
-            volume_change_str = f"\n📊 **Volume Change:** {sign}{change_pct:.1f}% {emoji}"
+            volume_change_str = f"\n📊 *Volume Change:* {sign}{change_pct:.1f}% {emoji}"
         
         message = f"""
-📊 **Volume Stats: {name}**
+📊 *Volume Stats: {name}*
 
-💎 **Volume 24h:** {volume_24h:,.4f} {floor_price_symbol}
-🛒 **Sales 24h:** {sales_24h}
-💵 **Avg Price:** {avg_price_24h:,.4f} {floor_price_symbol}{volume_change_str}
+💎 *Volume 24h:* {volume_24h:,.4f} {floor_price_symbol}
+🛒 *Sales 24h:* {sales_24h}
+💵 *Avg Price:* {avg_price_24h:,.4f} {floor_price_symbol}{volume_change_str}
 """
         return message.strip()
 

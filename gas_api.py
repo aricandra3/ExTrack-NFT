@@ -60,13 +60,13 @@ class GasAPI:
         base_fee = gas_data.get("base_fee", 0)
         
         message = f"""
-⛽ **Ethereum Gas Prices**
+⛽ *Ethereum Gas Prices*
 
-🐢 **Low:** {low:.2f} gwei
-🚶 **Average:** {average:.2f} gwei
-🚀 **Fast:** {fast:.2f} gwei
+🐢 *Low:* {low:.2f} gwei
+🚶 *Average:* {average:.2f} gwei
+🚀 *Fast:* {fast:.2f} gwei
 
-📊 **Base Fee:** {base_fee:.2f} gwei
+📊 *Base Fee:* {base_fee:.2f} gwei
 """
         return message.strip()
 

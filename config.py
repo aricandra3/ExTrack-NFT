@@ -18,6 +18,9 @@ ALERT_CHECK_INTERVAL = 300  # 5 minutes
 # Price history recording interval (in seconds)
 PRICE_HISTORY_INTERVAL = 3600  # 1 hour
 
+# Cooldown for repeat volume spike alerts (in seconds)
+VOLUME_ALERT_COOLDOWN_SECONDS = int(os.getenv("VOLUME_ALERT_COOLDOWN_SECONDS", "21600"))  # 6 hours
+
 # Volume spike detection multiplier (e.g., 2.0 = 2x average)
 VOLUME_SPIKE_MULTIPLIER = 2.0
 
@@ -25,4 +28,4 @@ VOLUME_SPIKE_MULTIPLIER = 2.0
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 
 # Database file
-DATABASE_FILE = "nft_tracker.db"
+DATABASE_FILE = os.getenv("DATABASE_FILE", "nft_tracker.db")

@@ -15,7 +15,13 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_BOT_TOKEN, ALERT_CHECK_INTERVAL, PRICE_HISTORY_INTERVAL, VOLUME_SPIKE_MULTIPLIER
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    ALERT_CHECK_INTERVAL,
+    PRICE_HISTORY_INTERVAL,
+    VOLUME_ALERT_COOLDOWN_SECONDS,
+    VOLUME_SPIKE_MULTIPLIER,
+)
 from opensea_api import opensea_api
 from gas_api import gas_api
 from price_api import price_api
@@ -35,10 +41,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._send_ok('GET')
-        
+
     def do_HEAD(self):
         self._send_ok('HEAD')
-    
+
     def log_message(self, format, *args):
         pass  # Suppress HTTP logs
 
@@ -56,6 +62,45 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+def _parse_db_timestamp(value: str | None) -> datetime | None:
+    """Parse SQLite CURRENT_TIMESTAMP values for lightweight cooldown checks."""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _is_in_cooldown(last_triggered_at: str | None, cooldown_seconds: int) -> bool:
+    if cooldown_seconds <= 0:
+        return False
+    last_triggered = _parse_db_timestamp(last_triggered_at)
+    if not last_triggered:
+        return False
+    return datetime.utcnow() - last_triggered < timedelta(seconds=cooldown_seconds)
+
+
+def _price_alert_condition_met(alert_type: str, current_price: float, target_price: float) -> bool:
+    if alert_type == "below":
+        return current_price < target_price
+    if alert_type == "above":
+        return current_price > target_price
+    return False
+
+
+def _price_alert_crossed(alert_type: str, last_price: float | None, target_price: float) -> bool:
+    if last_price is None or last_price <= 0:
+        return True
+    if alert_type == "below":
+        return last_price >= target_price
+    if alert_type == "above":
+        return last_price <= target_price
+    return False
 
 
 # ============== Inline Keyboard Menus ==============
@@ -721,7 +766,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             current_price = total.get("floor_price", 0) or 0
             symbol = total.get("floor_price_symbol", "ETH")
 
-        success = db.add_price_alert(user_id, slug, target_price, alert_type, 
+        success = db.add_price_alert(user_id, slug, target_price, alert_type,
                                       is_recurring=is_recurring, current_price=current_price)
         direction_text = "di bawah" if alert_type == "below" else "di atas"
         direction_emoji = "📉" if alert_type == "below" else "📈"
@@ -838,7 +883,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         except ValueError:
             await update.message.reply_text("❌ ID harus berupa angka.")
             return
-        
+
         type_map = {
             "price": ("Price Alert", db.remove_alert_by_id),
             "persen": ("% Alert", db.remove_percent_alert_by_id),
@@ -852,7 +897,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.MARKDOWN
             )
             return
-        
+
         type_name, remove_func = type_map[alert_type]
         success = remove_func(user_id, alert_id)
         if success:
@@ -1020,18 +1065,18 @@ async def floor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    await update.message.reply_text(f"🔍 Mencari data untuk `{collection_slug}`...", 
+    await update.message.reply_text(f"🔍 Mencari data untuk `{collection_slug}`...",
                                      parse_mode=ParseMode.MARKDOWN)
-    
+
     # Get stats and info in parallel for faster response
     stats, collection_info = await opensea_api.get_floor_price_fast(collection_slug)
-    
+
     if stats is None:
         await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
         return
-    
+
     message = opensea_api.format_floor_price(stats, collection_info)
     # Quick action buttons after floor check
     keyboard = InlineKeyboardMarkup([
@@ -1051,18 +1096,18 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
-    
+
     # Verify collection exists
     stats = await opensea_api.get_collection_stats(collection_slug)
     if stats and "error" in stats:
         await update.message.reply_text(f"❌ {stats['error']}")
         return
-    
+
     success = db.add_tracked_collection(user_id, collection_slug)
-    
+
     if success:
         await update.message.reply_text(
             f"✅ Berhasil menambahkan `{collection_slug}` ke daftar pantauan!",
@@ -1084,12 +1129,12 @@ async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
-    
+
     success = db.remove_tracked_collection(user_id, collection_slug)
-    
+
     if success:
         await update.message.reply_text(
             f"✅ Berhasil menghapus `{collection_slug}` dari daftar pantauan.",
@@ -1106,7 +1151,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """List all tracked collections."""
     user_id = update.effective_user.id
     collections = db.get_tracked_collections(user_id)
-    
+
     if not collections:
         await update.message.reply_text(
             "📋 Anda belum memantau koleksi apapun.\n"
@@ -1114,11 +1159,11 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
-    message = "📋 **Koleksi yang Anda pantau:**\n\n"
+
+    message = "📋 *Koleksi yang Anda pantau:*\n\n"
     for i, slug in enumerate(collections, 1):
         message += f"{i}. `{slug}`\n"
-    
+
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1126,7 +1171,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Check prices for all tracked collections."""
     user_id = update.effective_user.id
     collections = db.get_tracked_collections(user_id)
-    
+
     if not collections:
         await update.message.reply_text(
             "📋 Anda belum memantau koleksi apapun.\n"
@@ -1134,22 +1179,22 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     await update.message.reply_text("🔍 Mengambil data harga...")
-    
-    message = "📊 **Floor Price Koleksi Anda:**\n\n"
-    
+
+    message = "📊 *Floor Price Koleksi Anda:*\n\n"
+
     for slug in collections:
         stats = await opensea_api.get_collection_stats(slug)
         if stats and "error" not in stats:
             total = stats.get("total", {})
             floor_price = total.get("floor_price", 0)
             symbol = total.get("floor_price_symbol", "ETH")
-            message += f"• `{slug}`: **{floor_price:.4f} {symbol}**\n"
+            message += f"• `{slug}`: *{floor_price:.4f} {symbol}*\n"
         else:
             error = stats.get("error", "Unknown error") if stats else "Failed to fetch"
             message += f"• `{slug}`: ❌ {error}\n"
-    
+
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1164,45 +1209,45 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    
+
     try:
         target_price = float(context.args[1])
     except ValueError:
         await update.message.reply_text("❌ Harga target harus berupa angka.")
         return
-    
+
     alert_type = "below"
     for arg in context.args[2:]:
         if arg.lower() in ("above", "below"):
             alert_type = arg.lower()
             break
-            
+
     is_recurring = "repeat" in [a.lower() for a in context.args[2:]]
-    
+
     user_id = update.effective_user.id
-    
+
     # Verify collection exists and get current price
     stats = await opensea_api.get_collection_stats(collection_slug)
     if stats and "error" in stats:
         await update.message.reply_text(f"❌ {stats['error']}")
         return
-        
+
     current_price = 0
     symbol = "ETH"
     if stats:
         total = stats.get("total", {})
         current_price = total.get("floor_price", 0) or 0
         symbol = total.get("floor_price_symbol", "ETH")
-    
+
     success = db.add_price_alert(user_id, collection_slug, target_price, alert_type,
                                  is_recurring=is_recurring, current_price=current_price)
-    
+
     direction_text = "di bawah" if alert_type == "below" else "di atas"
     direction_emoji = "📉" if alert_type == "below" else "📈"
     repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
-    
+
     if success:
         await update.message.reply_text(
             f"✅ *Alert Berhasil Dibuat!*\n"
@@ -1223,13 +1268,13 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all active alerts for user."""
     user_id = update.effective_user.id
-    
+
     # Get all types of alerts
     price_alerts = db.get_user_alerts(user_id)
     percent_alerts = db.get_percentage_alerts(user_id)
     volume_alerts = db.get_volume_alerts(user_id)
     gas_alerts = db.get_gas_alerts(user_id)
-    
+
     if not price_alerts and not percent_alerts and not volume_alerts and not gas_alerts:
         await update.message.reply_text(
             "🔔 Anda belum memiliki alert aktif.\n"
@@ -1237,9 +1282,9 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     message = f"🔔 *Alert Aktif ({len(price_alerts) + len(percent_alerts) + len(volume_alerts) + len(gas_alerts)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    
+
     if price_alerts:
         message += "*💰 Price Alerts:*\n"
         for aid, slug, price, alert_type, recurring in price_alerts:
@@ -1247,7 +1292,7 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             repeat_badge = " 🔁" if recurring else ""
             message += f"  `#{aid}` `{slug}` {direction} *{price} ETH*{repeat_badge}\n"
         message += "\n"
-    
+
     if percent_alerts:
         message += "*📊 % Change Alerts:*\n"
         for aid, slug, percent, direction, recurring in percent_alerts:
@@ -1255,21 +1300,21 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             repeat_badge = " 🔁" if recurring else ""
             message += f"  `#{aid}` `{slug}` {dir_emoji} *{percent}%* {direction}{repeat_badge}\n"
         message += "\n"
-    
+
     if volume_alerts:
         message += "*💎 Volume Alerts:*\n"
         for aid, slug, multiplier in volume_alerts:
             message += f"  `#{aid}` `{slug}` spike *{multiplier}x*\n"
         message += "\n"
-    
+
     if gas_alerts:
         message += "*⛽ Gas Alerts:*\n"
         for aid, gwei, alert_type in gas_alerts:
             message += f"  `#{aid}` {alert_type} *{gwei} gwei*\n"
-            
+
     message += "\n_🔁 = recurring (alert aktif kembali setelah trigger)_\n\n"
     message += "_Gunakan_ `/delalert <tipe> <id>` _untuk menghapus._"
-    
+
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 async def delalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1282,14 +1327,14 @@ async def delalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode=ParseMode.MARKDOWN
         )
         return
-        
+
     alert_type = context.args[0].lower()
     try:
         alert_id = int(context.args[1])
     except ValueError:
         await update.message.reply_text("❌ ID harus berupa angka.")
         return
-        
+
     user_id = update.effective_user.id
     type_map = {
         "price": ("Price Alert", db.remove_alert_by_id),
@@ -1298,14 +1343,14 @@ async def delalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "volume": ("Volume Alert", db.remove_volume_alert_by_id),
         "gas": ("Gas Alert", db.remove_gas_alert_by_id),
     }
-    
+
     if alert_type not in type_map:
         await update.message.reply_text(
             "❌ Tipe tidak valid. Gunakan: `price` / `persen` / `volume` / `gas`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
-        
+
     type_name, remove_func = type_map[alert_type]
     success = remove_func(user_id, alert_id)
     if success:
@@ -1327,44 +1372,44 @@ async def palert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    
+
     try:
         percentage = float(context.args[1])
     except ValueError:
         await update.message.reply_text("❌ Persentase harus berupa angka.")
         return
-    
+
     direction = "both"
     for p in context.args[2:]:
         if p.lower() in ("up", "down", "both"):
             direction = p.lower()
             break
-            
+
     is_recurring = "repeat" in [p.lower() for p in context.args[2:]]
-    
+
     user_id = update.effective_user.id
-    
+
     # Verify collection exists and get ref price
     stats = await opensea_api.get_collection_stats(collection_slug)
     if stats and "error" in stats:
         await update.message.reply_text(f"❌ {stats['error']}")
         return
-        
+
     ref_price = 0
     symbol = "ETH"
     if stats:
         total = stats.get("total", {})
         ref_price = total.get("floor_price", 0) or 0
         symbol = total.get("floor_price_symbol", "ETH")
-    
+
     success = db.add_percentage_alert(user_id, collection_slug, percentage, direction,
                                       is_recurring=is_recurring, reference_price=ref_price)
-    
+
     direction_text = {"up": "📈 naik", "down": "📉 turun", "both": "↕️ naik/turun"}
     repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
-    
+
     if success:
         await update.message.reply_text(
             f"✅ *% Alert Berhasil Dibuat!*\n"
@@ -1393,20 +1438,20 @@ async def volume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    await update.message.reply_text(f"📊 Mengambil data volume untuk `{collection_slug}`...", 
+    await update.message.reply_text(f"📊 Mengambil data volume untuk `{collection_slug}`...",
                                      parse_mode=ParseMode.MARKDOWN)
-    
+
     stats, collection_info = await opensea_api.get_floor_price_fast(collection_slug)
-    
+
     if stats is None:
         await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
         return
-    
+
     # Get previous volume for comparison
     previous_volume = db.get_average_volume(collection_slug)
-    
+
     message = opensea_api.format_volume_stats(stats, collection_info, previous_volume)
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
@@ -1422,29 +1467,29 @@ async def valert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    
+
     try:
         multiplier = float(context.args[1]) if len(context.args) > 1 else VOLUME_SPIKE_MULTIPLIER
     except ValueError:
         multiplier = VOLUME_SPIKE_MULTIPLIER
-    
+
     user_id = update.effective_user.id
-    
+
     # Verify collection exists
     stats = await opensea_api.get_collection_stats(collection_slug)
     if stats and "error" in stats:
         await update.message.reply_text(f"❌ {stats['error']}")
         return
-    
+
     success = db.add_volume_alert(user_id, collection_slug, multiplier)
-    
+
     if success:
         await update.message.reply_text(
             f"📊 Volume Spike Alert berhasil diset!\n\n"
             f"Koleksi: `{collection_slug}`\n"
-            f"Trigger: Volume **{multiplier}x** dari rata-rata\n\n"
+            f"Trigger: Volume *{multiplier}x* dari rata-rata\n\n"
             f"Bot akan monitor volume 24h dan bandingkan dengan rata-rata 7 hari.",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1467,34 +1512,34 @@ async def addnft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
-    
+
     try:
         quantity = int(context.args[1])
         buy_price = float(context.args[2])
     except ValueError:
         await update.message.reply_text("❌ Jumlah harus integer dan harga harus angka.")
         return
-    
+
     user_id = update.effective_user.id
-    
+
     # Verify collection exists
     stats = await opensea_api.get_collection_stats(collection_slug)
     if stats and "error" in stats:
         await update.message.reply_text(f"❌ {stats['error']}")
         return
-    
+
     success = db.add_portfolio_item(user_id, collection_slug, quantity, buy_price)
-    
+
     if success:
         total_cost = quantity * buy_price
         await update.message.reply_text(
             f"✅ NFT berhasil ditambahkan ke portofolio!\n\n"
             f"Koleksi: `{collection_slug}`\n"
-            f"Jumlah: **{quantity} NFT**\n"
-            f"Buy Price: **{buy_price} ETH** per NFT\n"
-            f"Total Cost: **{total_cost:.4f} ETH**",
+            f"Jumlah: *{quantity} NFT*\n"
+            f"Buy Price: *{buy_price} ETH* per NFT\n"
+            f"Total Cost: *{total_cost:.4f} ETH*",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -1510,12 +1555,12 @@ async def removenft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
-    
+
     success = db.remove_portfolio_item(user_id, collection_slug)
-    
+
     if success:
         await update.message.reply_text(
             f"✅ `{collection_slug}` berhasil dihapus dari portofolio.",
@@ -1532,7 +1577,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Show user portfolio with P/L and ROI."""
     user_id = update.effective_user.id
     portfolio = db.get_portfolio(user_id)
-    
+
     if not portfolio:
         await update.message.reply_text(
             "💼 Portofolio Anda kosong.\n"
@@ -1540,56 +1585,56 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     await update.message.reply_text("💼 Menghitung portofolio Anda...")
-    
-    message = "💼 **Portofolio Anda**\n\n"
+
+    message = "💼 *Portofolio Anda*\n\n"
     total_cost = 0
     total_value = 0
-    
+
     for slug, quantity, buy_price, _ in portfolio:
         # Get current floor price
         stats = await opensea_api.get_collection_stats(slug)
-        
+
         if stats and "error" not in stats:
             total_data = stats.get("total", {})
             current_price = total_data.get("floor_price", 0) or 0
             symbol = total_data.get("floor_price_symbol", "ETH")
-            
+
             item_cost = quantity * buy_price
             item_value = quantity * current_price
             pl = item_value - item_cost
             roi = ((item_value - item_cost) / item_cost * 100) if item_cost > 0 else 0
-            
+
             emoji = "🟢" if pl >= 0 else "🔴"
             sign = "+" if pl >= 0 else ""
-            
-            message += f"**{slug.upper()}** ({quantity} NFT)\n"
+
+            message += f"*{slug.upper()}* ({quantity} NFT)\n"
             message += f"├ Buy: {buy_price:.4f} {symbol}\n"
             message += f"├ Now: {current_price:.4f} {symbol}\n"
             message += f"├ P/L: {sign}{pl:.4f} {symbol} ({sign}{roi:.1f}%) {emoji}\n"
             message += f"└ Value: {item_value:.4f} {symbol}\n\n"
-            
+
             total_cost += item_cost
             total_value += item_value
         else:
-            message += f"**{slug.upper()}** ({quantity} NFT)\n"
+            message += f"*{slug.upper()}* ({quantity} NFT)\n"
             message += f"└ ❌ Gagal ambil harga\n\n"
             total_cost += quantity * buy_price
-    
+
     # Summary
     total_pl = total_value - total_cost
     total_roi = ((total_value - total_cost) / total_cost * 100) if total_cost > 0 else 0
     emoji = "🟢" if total_pl >= 0 else "🔴"
     sign = "+" if total_pl >= 0 else ""
-    
+
     message += "━━━━━━━━━━━━━━━━\n"
-    message += f"📊 **TOTAL**\n"
-    message += f"├ Cost Basis: **{total_cost:.4f} ETH**\n"
-    message += f"├ Current Value: **{total_value:.4f} ETH**\n"
-    message += f"├ Unrealized P/L: **{sign}{total_pl:.4f} ETH**\n"
-    message += f"└ ROI: **{sign}{total_roi:.1f}%** {emoji}"
-    
+    message += f"📊 *TOTAL*\n"
+    message += f"├ Cost Basis: *{total_cost:.4f} ETH*\n"
+    message += f"├ Current Value: *{total_value:.4f} ETH*\n"
+    message += f"├ Unrealized P/L: *{sign}{total_pl:.4f} ETH*\n"
+    message += f"└ ROI: *{sign}{total_roi:.1f}%* {emoji}"
+
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 # ============== ETH Price & Converter Commands ==============
@@ -1647,7 +1692,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def gas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check current Ethereum gas prices."""
     await update.message.reply_text("⛽ Mengambil data gas...")
-    
+
     gas_data = await gas_api.get_gas_price()
     message = gas_api.format_gas_price(gas_data)
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
@@ -1664,26 +1709,26 @@ async def gasalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     try:
         target_gwei = float(context.args[0])
     except ValueError:
         await update.message.reply_text("❌ Target gwei harus berupa angka.")
         return
-    
+
     alert_type = context.args[1].lower() if len(context.args) > 1 else "below"
     if alert_type not in ["below", "above"]:
         alert_type = "below"
-    
+
     user_id = update.effective_user.id
     success = db.add_gas_alert(user_id, target_gwei, alert_type)
-    
+
     type_text = "di bawah" if alert_type == "below" else "di atas"
-    
+
     if success:
         await update.message.reply_text(
             f"⛽ Gas Alert berhasil diset!\n\n"
-            f"Alert: Gas {type_text} **{target_gwei} gwei**\n\n"
+            f"Alert: Gas {type_text} *{target_gwei} gwei*\n\n"
             f"Anda akan mendapat notifikasi ketika gas mencapai target.",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1697,39 +1742,49 @@ async def gasalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check price alerts."""
     alerts = db.get_all_active_alerts()
-    
-    for user_id, collection_slug, target_price, alert_type in alerts:
+
+    for user_id, collection_slug, target_price, alert_type, is_recurring, last_price, triggered_at in alerts:
         try:
             stats = await opensea_api.get_collection_stats(collection_slug)
             if stats and "error" not in stats:
                 total = stats.get("total", {})
-                current_price = total.get("floor_price", 0)
+                current_price = total.get("floor_price")
+                if current_price is None:
+                    continue
                 symbol = total.get("floor_price_symbol", "ETH")
-                
-                should_trigger = False
-                if alert_type == "below" and current_price < target_price:
-                    should_trigger = True
-                elif alert_type == "above" and current_price > target_price:
-                    should_trigger = True
-                
+
+                condition_met = _price_alert_condition_met(alert_type, current_price, target_price)
+                crossed = _price_alert_crossed(alert_type, last_price, target_price)
+                should_trigger = condition_met and (not is_recurring or not triggered_at or crossed)
+
                 if should_trigger:
                     message = (
-                        f"🚨 **Alert Triggered!**\n\n"
+                        f"🚨 *Alert Triggered!*\n\n"
                         f"Koleksi: `{collection_slug}`\n"
-                        f"Floor Price: **{current_price:.4f} {symbol}**\n"
+                        f"Floor Price: *{current_price:.4f} {symbol}*\n"
                         f"Target: {alert_type} {target_price} {symbol}"
                     )
-                    
+
                     try:
                         await context.bot.send_message(
                             chat_id=user_id,
                             text=message,
                             parse_mode=ParseMode.MARKDOWN
                         )
-                        db.deactivate_alert(user_id, collection_slug, target_price)
+                        db.deactivate_alert(
+                            user_id,
+                            collection_slug,
+                            target_price,
+                            alert_type,
+                            current_price=current_price,
+                        )
                     except Exception as e:
                         logger.error(f"Failed to send alert to user {user_id}: {e}")
-        
+                else:
+                    db.update_price_alert_observed_price(
+                        user_id, collection_slug, target_price, alert_type, current_price
+                    )
+
         except Exception as e:
             logger.error(f"Error checking alert for {collection_slug}: {e}")
 
@@ -1737,52 +1792,63 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_percentage_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check percentage-based alerts."""
     alerts = db.get_all_percentage_alerts()
-    
-    for user_id, collection_slug, percentage, direction in alerts:
+
+    for user_id, collection_slug, percentage, direction, reference_price, _is_recurring in alerts:
         try:
             # Get current price
             stats = await opensea_api.get_collection_stats(collection_slug)
             if stats and "error" not in stats:
                 total = stats.get("total", {})
-                current_price = total.get("floor_price", 0)
+                current_price = total.get("floor_price")
+                if current_price is None:
+                    continue
                 symbol = total.get("floor_price_symbol", "ETH")
-                
-                # Get oldest recorded price
-                old_price = db.get_oldest_price(collection_slug)
-                
-                if old_price and old_price > 0:
-                    change_pct = ((current_price - old_price) / old_price) * 100
-                    
-                    should_trigger = False
-                    if direction == "up" and change_pct >= percentage:
-                        should_trigger = True
-                    elif direction == "down" and change_pct <= -percentage:
-                        should_trigger = True
-                    elif direction == "both" and abs(change_pct) >= percentage:
-                        should_trigger = True
-                    
-                    if should_trigger:
-                        sign = "+" if change_pct > 0 else ""
-                        trend = "📈 NAIK" if change_pct > 0 else "📉 TURUN"
-                        
-                        message = (
-                            f"🚨 **Percentage Alert!**\n\n"
-                            f"Koleksi: `{collection_slug}`\n"
-                            f"Perubahan: {trend} **{sign}{change_pct:.1f}%**\n"
-                            f"Harga lama: {old_price:.4f} {symbol}\n"
-                            f"Harga sekarang: **{current_price:.4f} {symbol}**"
+
+                ref_price = reference_price or db.get_oldest_price(collection_slug)
+                if not ref_price or ref_price <= 0:
+                    db.update_percentage_alert_ref_price(
+                        user_id, collection_slug, percentage, direction, current_price
+                    )
+                    continue
+
+                change_pct = ((current_price - ref_price) / ref_price) * 100
+
+                should_trigger = False
+                if direction == "up" and change_pct >= percentage:
+                    should_trigger = True
+                elif direction == "down" and change_pct <= -percentage:
+                    should_trigger = True
+                elif direction == "both" and abs(change_pct) >= percentage:
+                    should_trigger = True
+
+                if should_trigger:
+                    sign = "+" if change_pct > 0 else ""
+                    trend = "📈 NAIK" if change_pct > 0 else "📉 TURUN"
+
+                    message = (
+                        f"🚨 *Percentage Alert!*\n\n"
+                        f"Koleksi: `{collection_slug}`\n"
+                        f"Perubahan: {trend} *{sign}{change_pct:.1f}%*\n"
+                        f"Harga referensi: {ref_price:.4f} {symbol}\n"
+                        f"Harga sekarang: *{current_price:.4f} {symbol}*"
+                    )
+
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=message,
+                            parse_mode=ParseMode.MARKDOWN
                         )
-                        
-                        try:
-                            await context.bot.send_message(
-                                chat_id=user_id,
-                                text=message,
-                                parse_mode=ParseMode.MARKDOWN
-                            )
-                            db.deactivate_percentage_alert(user_id, collection_slug, percentage)
-                        except Exception as e:
-                            logger.error(f"Failed to send percentage alert to user {user_id}: {e}")
-        
+                        db.deactivate_percentage_alert(
+                            user_id,
+                            collection_slug,
+                            percentage,
+                            direction,
+                            new_ref_price=current_price,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send percentage alert to user {user_id}: {e}")
+
         except Exception as e:
             logger.error(f"Error checking percentage alert for {collection_slug}: {e}")
 
@@ -1790,46 +1856,49 @@ async def check_percentage_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_volume_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check volume spike alerts."""
     alerts = db.get_all_volume_alerts()
-    
-    for user_id, collection_slug, multiplier in alerts:
+
+    for user_id, collection_slug, multiplier, last_triggered_at in alerts:
         try:
             stats = await opensea_api.get_collection_stats(collection_slug)
             if stats and "error" not in stats:
                 # Get current volume from intervals
                 intervals = stats.get("intervals", [])
                 current_volume = 0
-                
+
                 for interval in intervals:
                     if interval.get("interval") == "one_day":
                         current_volume = interval.get("volume", 0) or 0
                         break
-                
+
                 # Get average volume
                 avg_volume = db.get_average_volume(collection_slug)
-                
+
                 if avg_volume and avg_volume > 0 and current_volume > 0:
                     spike_ratio = current_volume / avg_volume
-                    
-                    if spike_ratio >= multiplier:
+
+                    if spike_ratio >= multiplier and not _is_in_cooldown(
+                        last_triggered_at, VOLUME_ALERT_COOLDOWN_SECONDS
+                    ):
                         symbol = stats.get("total", {}).get("floor_price_symbol", "ETH")
-                        
+
                         message = (
-                            f"🚨 **Volume Spike Alert!**\n\n"
+                            f"🚨 *Volume Spike Alert!*\n\n"
                             f"Koleksi: `{collection_slug}`\n"
-                            f"Volume 24h: **{current_volume:.2f} {symbol}**\n"
+                            f"Volume 24h: *{current_volume:.2f} {symbol}*\n"
                             f"Rata-rata: {avg_volume:.2f} {symbol}\n"
-                            f"Spike: **{spike_ratio:.1f}x** 📊"
+                            f"Spike: *{spike_ratio:.1f}x* 📊"
                         )
-                        
+
                         try:
                             await context.bot.send_message(
                                 chat_id=user_id,
                                 text=message,
                                 parse_mode=ParseMode.MARKDOWN
                             )
+                            db.mark_volume_alert_triggered(user_id, collection_slug)
                         except Exception as e:
                             logger.error(f"Failed to send volume alert to user {user_id}: {e}")
-        
+
         except Exception as e:
             logger.error(f"Error checking volume alert for {collection_slug}: {e}")
 
@@ -1837,69 +1906,67 @@ async def check_volume_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_gas_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check gas price alerts."""
     alerts = db.get_all_gas_alerts()
-    
+
     if not alerts:
         return
-    
+
     gas_data = await gas_api.get_gas_price()
     if gas_data and "error" not in gas_data:
         current_gas = gas_data.get("average", 0)
-        
+
         for user_id, target_gwei, alert_type in alerts:
             should_trigger = False
             if alert_type == "below" and current_gas < target_gwei:
                 should_trigger = True
             elif alert_type == "above" and current_gas > target_gwei:
                 should_trigger = True
-            
+
             if should_trigger:
                 type_text = "di bawah" if alert_type == "below" else "di atas"
-                
+
                 message = (
-                    f"⛽ **Gas Alert!**\n\n"
-                    f"Gas saat ini: **{current_gas:.1f} gwei**\n"
+                    f"⛽ *Gas Alert!*\n\n"
+                    f"Gas saat ini: *{current_gas:.1f} gwei*\n"
                     f"Target: {type_text} {target_gwei} gwei ✅"
                 )
-                
+
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=message,
                         parse_mode=ParseMode.MARKDOWN
                     )
-                    db.deactivate_gas_alert(user_id, target_gwei)
+                    db.deactivate_gas_alert(user_id, target_gwei, alert_type)
                 except Exception as e:
                     logger.error(f"Failed to send gas alert to user {user_id}: {e}")
 
 
 async def record_price_history(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Background job to record price history for all tracked collections."""
-    # Get unique collections from all tracked + alerts
-    tracked = db.get_all_tracked_collections()
-    collections = set(slug for _, slug in tracked)
-    
+    """Background job to record price history for all monitored collections."""
+    collections = set(db.get_all_monitored_collection_slugs())
+
     for collection_slug in collections:
         try:
             stats = await opensea_api.get_collection_stats(collection_slug)
             if stats and "error" not in stats:
                 total = stats.get("total", {})
                 floor_price = total.get("floor_price", 0) or 0
-                
+
                 # Get volume data from intervals
                 intervals = stats.get("intervals", [])
                 volume_24h = 0
                 sales_count = 0
                 avg_price = 0
-                
+
                 for interval in intervals:
                     if interval.get("interval") == "one_day":
                         volume_24h = interval.get("volume", 0) or 0
                         sales_count = interval.get("sales", 0) or 0
                         avg_price = interval.get("average_price", 0) or 0
                         break
-                
+
                 db.save_price_history(collection_slug, floor_price, volume_24h, sales_count, avg_price)
-        
+
         except Exception as e:
             logger.error(f"Error recording price history for {collection_slug}: {e}")
 
@@ -1917,10 +1984,10 @@ async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     text = " ".join(context.args)
     parts = text.split("|")
-    
+
     if len(parts) < 3:
         await update.message.reply_text(
             "❌ Format salah. Pisahkan dengan `|`\n\n"
@@ -1928,12 +1995,12 @@ async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     nft_name = parts[0].strip()
     mint_price = parts[1].strip()
     date_str = parts[2].strip()
     mint_link = parts[3].strip() if len(parts) > 3 else ""
-    
+
     try:
         mint_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
     except ValueError:
@@ -1942,10 +2009,10 @@ async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     user_id = update.effective_user.id
     success = db.add_mint_reminder(user_id, nft_name, mint_price, date_str, mint_link)
-    
+
     if success:
         msg = (f"🗓 Mint Reminder berhasil ditambahkan!\n\n"
                f"NFT: *{nft_name}*\n"
@@ -1956,7 +2023,7 @@ async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         msg += "\n_Bot akan mengingatkan 30 menit & 5 menit sebelum mint._"
     else:
         msg = "❌ Gagal menambahkan reminder."
-    
+
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
@@ -1964,7 +2031,7 @@ async def mints_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """List all active mint reminders."""
     user_id = update.effective_user.id
     reminders = db.get_mint_reminders(user_id)
-    
+
     if not reminders:
         await update.message.reply_text(
             "🗓 Anda belum memiliki mint reminder.\n"
@@ -1972,10 +2039,10 @@ async def mints_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
-    message = "🗓 **Mint Reminders Aktif:**\n\n"
+
+    message = "🗓 *Mint Reminders Aktif:*\n\n"
     for rid, name, price, mdate, link in reminders:
-        message += f"**#{rid} — {name}**\n"
+        message += f"*#{rid} — {name}*\n"
         message += f"├ 💰 Price: {price}\n"
         message += f"├ 📅 Date: `{mdate}`\n"
         if link:
@@ -1983,7 +2050,7 @@ async def mints_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             message += f"└ 🔗 No link\n"
         message += "\n"
-    
+
     message += "_Hapus dengan_ `/removemint <id>`"
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
@@ -1997,16 +2064,16 @@ async def removemint_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    
+
     try:
         reminder_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("❌ ID harus berupa angka. Cek ID di /mints")
         return
-    
+
     user_id = update.effective_user.id
     success = db.remove_mint_reminder(user_id, reminder_id)
-    
+
     if success:
         await update.message.reply_text(f"✅ Reminder #{reminder_id} berhasil dihapus.")
     else:
@@ -2017,44 +2084,44 @@ async def check_mint_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check and send mint reminders."""
     reminders = db.get_upcoming_reminders()
     now = datetime.now()
-    
+
     for rid, user_id, nft_name, mint_price, mint_date_str, mint_link, reminded_30, reminded_5 in reminders:
         try:
             mint_dt = datetime.strptime(mint_date_str, "%Y-%m-%d %H:%M")
             time_until = mint_dt - now
             minutes_until = time_until.total_seconds() / 60
-            
+
             # Deactivate if mint time has already passed
             if minutes_until < -5:
                 db.deactivate_mint_reminder(rid)
                 continue
-            
+
             should_send = False
             reminder_type = ""
-            
+
             # 30 minute reminder
             if not reminded_30 and 25 <= minutes_until <= 35:
                 should_send = True
                 reminder_type = "30min"
-                time_text = "⏰ **30 menit lagi!**"
-            
+                time_text = "⏰ *30 menit lagi!*"
+
             # 5 minute reminder
             elif not reminded_5 and 0 <= minutes_until <= 8:
                 should_send = True
                 reminder_type = "5min"
-                time_text = "🚨 **5 menit lagi!**"
-            
+                time_text = "🚨 *5 menit lagi!*"
+
             if should_send:
                 message = (
-                    f"🗓 **Mint Reminder!**\n\n"
+                    f"🗓 *Mint Reminder!*\n\n"
                     f"{time_text}\n\n"
-                    f"NFT: **{nft_name}**\n"
+                    f"NFT: *{nft_name}*\n"
                     f"Price: {mint_price}\n"
                     f"Waktu: `{mint_date_str}`\n"
                 )
                 if mint_link:
                     message += f"\n🔗 [Mint Link]({mint_link})"
-                
+
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
@@ -2065,7 +2132,7 @@ async def check_mint_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                     db.mark_reminded(rid, reminder_type)
                 except Exception as e:
                     logger.error(f"Failed to send mint reminder to user {user_id}: {e}")
-        
+
         except Exception as e:
             logger.error(f"Error checking mint reminder {rid}: {e}")
 
@@ -2076,14 +2143,14 @@ def main() -> None:
         print("❌ Error: TELEGRAM_BOT_TOKEN tidak ditemukan!")
         print("Silakan copy .env.example ke .env dan isi dengan token bot Anda.")
         return
-    
+
     # Start health check server in background thread (for Koyeb)
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    
+
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -2108,15 +2175,15 @@ def main() -> None:
     application.add_handler(CommandHandler("addmint", addmint_command))
     application.add_handler(CommandHandler("mints", mints_command))
     application.add_handler(CommandHandler("removemint", removemint_command))
-    
+
     # Add callback handler for inline keyboard buttons
     application.add_handler(CallbackQueryHandler(button_handler))
-    
+
     # Add message handler for pending input from menu buttons
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, pending_input_handler
     ))
-    
+
     # Add background jobs
     job_queue = application.job_queue
     job_queue.run_repeating(check_alerts, interval=ALERT_CHECK_INTERVAL, first=60)
@@ -2125,7 +2192,7 @@ def main() -> None:
     job_queue.run_repeating(check_gas_alerts, interval=ALERT_CHECK_INTERVAL, first=150)
     job_queue.run_repeating(check_mint_reminders, interval=60, first=30)
     job_queue.run_repeating(record_price_history, interval=PRICE_HISTORY_INTERVAL, first=300)
-    
+
     # Start the bot
     print("🚀 Bot started! Press Ctrl+C to stop.")
     print("📊 Features: Price alerts, % alerts, Volume alerts, Portfolio, Gas alerts, ETH/IDR converter, Mint reminders")
