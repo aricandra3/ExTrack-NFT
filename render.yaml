@@ -8,3 +8,9 @@ services:
         sync: false
       - key: OPENSEA_API_KEY
         sync: false
+      - key: ETHERSCAN_API_KEY
+        sync: false
+      - key: DATABASE_FILE
+        value: nft_tracker.db
+      - key: VOLUME_ALERT_COOLDOWN_SECONDS
+        value: "21600"

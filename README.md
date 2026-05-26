@@ -2,7 +2,9 @@
 
 Bot Telegram untuk memantau NFT, portfolio, dan gas Ethereum.
 
-## 🚀 Deploy ke Koyeb (GRATIS)
+## 🚀 Deploy ke Koyeb Web Service
+
+Gunakan **Web Service** dengan scale **1 instance** selama bot masih memakai long polling dan job scheduler internal. Jika scale lebih dari 1, Telegram polling dan background alert checker bisa berjalan dobel.
 
 ### Step 1: Push ke GitHub
 
@@ -21,6 +23,10 @@ Tambahkan di Koyeb **"Environment variables"**:
 | `TELEGRAM_BOT_TOKEN` | Token dari @BotFather |
 | `OPENSEA_API_KEY` | API key OpenSea (opsional) |
 | `ETHERSCAN_API_KEY` | API key Etherscan (untuk gas) |
+| `DATABASE_FILE` | Lokasi SQLite DB, default `nft_tracker.db` |
+| `VOLUME_ALERT_COOLDOWN_SECONDS` | Cooldown volume alert, default `21600` |
+
+> Untuk publik multi-user, jangan mengandalkan SQLite di filesystem container tanpa persistence. Gunakan volume/persistent path, atau migrasi ke Postgres sebelum scale up.
 
 ## 📋 Commands
 
@@ -63,4 +69,3 @@ cp .env.example .env
 # Edit .env dengan token Anda
 python3 bot.py
 ```
-
