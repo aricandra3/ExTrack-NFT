@@ -232,6 +232,19 @@ class Database:
             )
         """)
 
+        # Table for per-user collection slug aliases, used by dot shortcuts like ".p bonsai"
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS slug_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                collection_slug TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, alias)
+            )
+        """)
+
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts(is_active, collection_slug)"
         )
@@ -243,6 +256,9 @@ class Database:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_history_collection_time ON price_history(collection_slug, recorded_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_slug_aliases_user ON slug_aliases(user_id, alias)"
         )
 
         conn.commit()
@@ -834,6 +850,65 @@ class Database:
         results = [row[0] for row in cursor.fetchall()]
         conn.close()
         return results
+
+    # ============== Slug Alias Methods ==============
+
+    def set_slug_alias(self, user_id: int, alias: str, collection_slug: str) -> bool:
+        """Create or update a short alias for a collection slug."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """INSERT INTO slug_aliases (user_id, alias, collection_slug)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id, alias)
+                   DO UPDATE SET collection_slug = ?, updated_at = CURRENT_TIMESTAMP""",
+                (user_id, alias.lower(), collection_slug.lower(), collection_slug.lower())
+            )
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
+    def get_slug_alias(self, user_id: int, alias: str) -> Optional[str]:
+        """Resolve a user's alias to a collection slug."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT collection_slug FROM slug_aliases WHERE user_id = ? AND alias = ?",
+            (user_id, alias.lower())
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def get_slug_aliases(self, user_id: int) -> List[Tuple[str, str]]:
+        """List all aliases for a user."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT alias, collection_slug FROM slug_aliases
+               WHERE user_id = ? ORDER BY alias ASC""",
+            (user_id,)
+        )
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+    def remove_slug_alias(self, user_id: int, alias: str) -> bool:
+        """Remove a user's alias."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM slug_aliases WHERE user_id = ? AND alias = ?",
+            (user_id, alias.lower())
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected > 0
 
     # ============== Mint Reminder Methods ==============
 

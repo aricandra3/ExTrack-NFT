@@ -121,6 +121,12 @@ class OpenSeaAPI:
         except (TypeError, ValueError):
             return "N/A"
 
+    def _first_present(self, *values):
+        for value in values:
+            if value not in (None, "", "N/A", 0, "0"):
+                return value
+        return None
+
     def _format_price(self, eth_amount: Any, symbol: str = "ETH",
                       eth_usd: float = 0, eth_idr: float = 0) -> str:
         try:
@@ -264,7 +270,6 @@ class OpenSeaAPI:
         floor_price = total.get("floor_price", 0) or 0
         floor_price_symbol = total.get("floor_price_symbol", "ETH")
         num_owners = total.get("num_owners", "N/A")
-        total_supply = total.get("total_supply", "N/A")
         total_volume = total.get("volume", 0) or 0
         one_day = self._get_interval(stats, "one_day")
         volume_24h = one_day.get("volume", 0) or 0
@@ -278,15 +283,27 @@ class OpenSeaAPI:
         if collection_info and "name" in collection_info:
             name = collection_info["name"]
 
-        contracts = (collection_info or {}).get("primary_asset_contracts") or []
+        info = collection_info or {}
+        contracts = info.get("primary_asset_contracts") or []
         first_contract = contracts[0] if contracts else {}
+        info_stats = info.get("stats") or {}
+        total_supply = self._first_present(
+            total.get("total_supply"),
+            total.get("count"),
+            info.get("total_supply"),
+            info.get("total_items"),
+            info.get("supply"),
+            info_stats.get("total_supply"),
+            info_stats.get("count"),
+            first_contract.get("total_supply"),
+        )
         chain = (
-            (collection_info or {}).get("chain")
+            info.get("chain")
             or first_contract.get("chain_identifier")
             or first_contract.get("chain")
             or "ethereum"
         )
-        created_date = (collection_info or {}).get("created_date") or (collection_info or {}).get("created_at")
+        created_date = info.get("created_date") or info.get("created_at")
 
         # Format numbers safely
         try:
@@ -294,10 +311,7 @@ class OpenSeaAPI:
         except:
             num_owners_str = str(num_owners)
         
-        try:
-            total_supply_str = f"{total_supply:,}" if isinstance(total_supply, (int, float)) else str(total_supply)
-        except:
-            total_supply_str = str(total_supply)
+        total_supply_str = self._format_number(total_supply) if total_supply is not None else "N/A"
 
         avg_vs_floor = ""
         if floor_price and avg_price_24h:
@@ -331,7 +345,7 @@ class OpenSeaAPI:
         return "\n".join(lines).strip()
     
     def format_volume_stats(self, stats: Dict[str, Any], collection_info: Optional[Dict[str, Any]] = None,
-                            previous_volume: Optional[float] = None) -> str:
+                            previous_volume: Optional[float] = None, collection_slug: str = "slug") -> str:
         """Format volume and sales stats into a readable message"""
         if stats is None:
             return "❌ Error: Gagal mengambil data"
@@ -375,11 +389,14 @@ class OpenSeaAPI:
             volume_change_str = f"\n📊 *Volume Change:* {sign}{change_pct:.1f}% {emoji}"
         
         message = f"""
-📊 *Volume Stats: {name}*
+💎 *Volume: {self._escape_md(name)}*
 
-💎 *Volume 24h:* {volume_24h:,.4f} {floor_price_symbol}
-🛒 *Sales 24h:* {sales_24h}
-💵 *Avg Price:* {avg_price_24h:,.4f} {floor_price_symbol}{volume_change_str}
+📊 *Market*
+💎 24h Volume: *{volume_24h:,.4f} {floor_price_symbol}*
+🧾 24h Sales: *{sales_24h}*
+💵 Avg Sale: *{avg_price_24h:,.4f} {floor_price_symbol}*{volume_change_str}
+
+⏰ Alert: `/valert {self._escape_md(collection_slug)} 2`
 """
         return message.strip()
 
