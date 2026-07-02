@@ -27,5 +27,8 @@ VOLUME_SPIKE_MULTIPLIER = 2.0
 # Etherscan API Key for gas price
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 
-# Database file
+# PostgreSQL database URL. If set, the bot uses Postgres instead of SQLite.
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# SQLite database file used when DATABASE_URL is not set.
 DATABASE_FILE = os.getenv("DATABASE_FILE", "nft_tracker.db")

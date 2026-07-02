@@ -571,6 +571,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data.startswith("qa_valert_"):
+        slug = data[10:]  # extract slug from "qa_valert_<slug>"
+        context.user_data["pending_action"] = "valert"
+        context.user_data["pending_slug"] = slug
+        cancel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
+        ])
+        await query.edit_message_text(
+            text=(
+                f"📢 *Set Volume Alert untuk* `{slug}`\n\n"
+                "Ketik multiplier volume spike:\n\n"
+                "_Contoh:_ `2` atau `3`"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=cancel_kb
+        )
+        return
+
     if data.startswith("qa_track_"):
         slug = data[9:]  # extract slug from "qa_track_<slug>"
         success = db.add_tracked_collection(user_id, slug)
@@ -639,17 +657,30 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             f"🔍 Mencari data untuk `{slug}`...",
             parse_mode=ParseMode.MARKDOWN
         )
-        stats, collection_info = await opensea_api.get_floor_price_fast(slug)
+        overview_task = opensea_api.get_collection_overview(slug)
+        eth_task = price_api.get_eth_price()
+        (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
         if stats is None:
             await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
             return
-        message = opensea_api.format_floor_price(stats, collection_info)
+        message = opensea_api.format_floor_price(
+            stats,
+            collection_info,
+            sales_data=sales_data,
+            eth_price=eth_data,
+            collection_slug=slug,
+        )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("⚡ Set Alert", callback_data=f"qa_alert_{slug}"),
              InlineKeyboardButton("📌 Add Watchlist", callback_data=f"qa_track_{slug}")],
             [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await update.message.reply_text(
+            message,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
         return
 
     if action == "track":
@@ -697,7 +728,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         previous_volume = db.get_average_volume(slug)
         message = opensea_api.format_volume_stats(stats, collection_info, previous_volume)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Set Volume Alert", callback_data=f"qa_alert_{slug}"),
+            [InlineKeyboardButton("📢 Set Volume Alert", callback_data=f"qa_valert_{slug}"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -842,9 +873,20 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if action == "valert":
         parts = text.split()
-        slug = parts[0].lower()
+        if pending_slug:
+            slug = pending_slug
+            multiplier_arg = parts[0] if parts else str(VOLUME_SPIKE_MULTIPLIER)
+        else:
+            if not parts:
+                await update.message.reply_text(
+                    "❌ Format: `slug [multiplier]`\n_Contoh:_ `azuki 3`",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            slug = parts[0].lower()
+            multiplier_arg = parts[1] if len(parts) > 1 else str(VOLUME_SPIKE_MULTIPLIER)
         try:
-            multiplier = float(parts[1]) if len(parts) > 1 else VOLUME_SPIKE_MULTIPLIER
+            multiplier = float(multiplier_arg)
         except ValueError:
             multiplier = VOLUME_SPIKE_MULTIPLIER
         stats = await opensea_api.get_collection_stats(slug)
@@ -1070,21 +1112,34 @@ async def floor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"🔍 Mencari data untuk `{collection_slug}`...",
                                      parse_mode=ParseMode.MARKDOWN)
 
-    # Get stats and info in parallel for faster response
-    stats, collection_info = await opensea_api.get_floor_price_fast(collection_slug)
+    # Get market stats, collection info, recent sales, and ETH fiat rates in parallel.
+    overview_task = opensea_api.get_collection_overview(collection_slug)
+    eth_task = price_api.get_eth_price()
+    (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
 
     if stats is None:
         await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
         return
 
-    message = opensea_api.format_floor_price(stats, collection_info)
+    message = opensea_api.format_floor_price(
+        stats,
+        collection_info,
+        sales_data=sales_data,
+        eth_price=eth_data,
+        collection_slug=collection_slug,
+    )
     # Quick action buttons after floor check
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ Set Alert", callback_data=f"qa_alert_{collection_slug}"),
          InlineKeyboardButton("📌 Add Watchlist", callback_data=f"qa_track_{collection_slug}")],
         [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
     ])
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    await update.message.reply_text(
+        message,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
 
 
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

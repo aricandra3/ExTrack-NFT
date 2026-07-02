@@ -23,10 +23,11 @@ Tambahkan di Koyeb **"Environment variables"**:
 | `TELEGRAM_BOT_TOKEN` | Token dari @BotFather |
 | `OPENSEA_API_KEY` | API key OpenSea (opsional) |
 | `ETHERSCAN_API_KEY` | API key Etherscan (untuk gas) |
-| `DATABASE_FILE` | Lokasi SQLite DB, default `nft_tracker.db` |
+| `DATABASE_URL` | PostgreSQL URL untuk deploy publik multi-user |
+| `DATABASE_FILE` | Lokasi SQLite DB fallback, default `nft_tracker.db` |
 | `VOLUME_ALERT_COOLDOWN_SECONDS` | Cooldown volume alert, default `21600` |
 
-> Untuk publik multi-user, jangan mengandalkan SQLite di filesystem container tanpa persistence. Gunakan volume/persistent path, atau migrasi ke Postgres sebelum scale up.
+> Untuk publik multi-user, isi `DATABASE_URL` dari Koyeb Database/managed Postgres. Jika `DATABASE_URL` kosong, bot tetap memakai SQLite lokal dari `DATABASE_FILE`.
 
 ## 📋 Commands
 

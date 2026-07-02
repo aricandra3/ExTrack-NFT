@@ -1,26 +1,106 @@
 import sqlite3
 from typing import List, Optional, Tuple
-from config import DATABASE_FILE
+from config import DATABASE_FILE, DATABASE_URL
+
+
+def _translate_postgres_sql(sql: str) -> str:
+    """Translate the small SQLite SQL subset used here into Postgres SQL."""
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    sql = sql.replace(
+        "datetime('now', ? || ' hours')",
+        "(CURRENT_TIMESTAMP + (%s || ' hours')::interval)"
+    )
+    return sql.replace("?", "%s")
+
+
+class _PostgresCursor:
+    """Cursor wrapper that lets existing SQLite-style queries run on psycopg."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, sql: str, params=None):
+        return self._cursor.execute(_translate_postgres_sql(sql), params)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+
+class _PostgresConnection:
+    """Connection wrapper returning Postgres cursors with SQL translation."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def cursor(self):
+        return _PostgresCursor(self._connection.cursor())
+
+    def commit(self):
+        self._connection.commit()
+
+    def close(self):
+        self._connection.close()
 
 
 class Database:
     """SQLite database for storing tracked collections and alerts"""
 
     def __init__(self):
+        self.database_url = DATABASE_URL
+        self.is_postgres = bool(self.database_url)
         self.db_file = DATABASE_FILE
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _get_connection(self):
         """Get a database connection"""
+        if self.is_postgres:
+            try:
+                import psycopg
+            except ImportError as exc:
+                raise RuntimeError(
+                    "DATABASE_URL is set, but psycopg is not installed. "
+                    "Run pip install -r requirements.txt."
+                ) from exc
+            database_url = self.database_url
+            if database_url.startswith("postgres://"):
+                database_url = "postgresql://" + database_url[len("postgres://"):]
+            return _PostgresConnection(psycopg.connect(database_url))
         return sqlite3.connect(self.db_file)
 
-    def _add_column_if_missing(self, cursor: sqlite3.Cursor, table: str, column_def: str):
+    def _column_exists(self, cursor, table: str, column_name: str) -> bool:
+        if self.is_postgres:
+            cursor.execute(
+                """SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = ? AND column_name = ?""",
+                (table, column_name)
+            )
+            return cursor.fetchone() is not None
+
+        cursor.execute(f"PRAGMA table_info({table})")
+        return any(row[1] == column_name for row in cursor.fetchall())
+
+    def _add_column_if_missing(self, cursor, table: str, column_def: str):
         """Add a column during lightweight migrations when it does not exist yet."""
-        try:
+        column_name = column_def.split()[0]
+        if not self._column_exists(cursor, table, column_name):
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" not in str(exc).lower():
-                raise
+
+    def _is_integrity_error(self, exc: Exception) -> bool:
+        exc_type = type(exc).__name__.lower()
+        exc_module = type(exc).__module__.lower()
+        return (
+            isinstance(exc, sqlite3.IntegrityError)
+            or "integrity" in exc_type
+            or "uniqueviolation" in exc_type
+            or "psycopg.errors" in exc_module
+        )
 
     def _init_db(self):
         """Initialize database tables"""
@@ -181,8 +261,10 @@ class Database:
             )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False  # Already tracking
+        except Exception as exc:
+            if self._is_integrity_error(exc):
+                return False  # Already tracking
+            raise
         finally:
             conn.close()
 
@@ -244,8 +326,10 @@ class Database:
             )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False  # Alert already exists
+        except Exception as exc:
+            if self._is_integrity_error(exc):
+                return False  # Alert already exists
+            raise
         finally:
             conn.close()
 
@@ -462,8 +546,10 @@ class Database:
             )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False
+        except Exception as exc:
+            if self._is_integrity_error(exc):
+                return False
+            raise
         finally:
             conn.close()
 
@@ -555,8 +641,10 @@ class Database:
             )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False
+        except Exception as exc:
+            if self._is_integrity_error(exc):
+                return False
+            raise
         finally:
             conn.close()
 
@@ -681,8 +769,10 @@ class Database:
             )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False
+        except Exception as exc:
+            if self._is_integrity_error(exc):
+                return False
+            raise
         finally:
             conn.close()
 
