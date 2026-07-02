@@ -93,14 +93,14 @@ class PriceAPI:
         idr_sign = "+" if idr_change >= 0 else ""
 
         message = (
-            "💱 *Harga ETH Real-Time*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🇺🇸 *USD:*  `${usd:,.2f}`\n"
-            f"    24h: {usd_sign}{usd_change:.2f}% {usd_emoji}\n\n"
-            f"🇮🇩 *IDR:*  `Rp {idr:,.0f}`\n"
-            f"    24h: {idr_sign}{idr_change:.2f}% {idr_emoji}\n\n"
-            f"📊 *Market Cap:* `${market_cap:,.0f}`\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💱 *Ethereum Price*\n"
+            "Live market rate\n\n"
+            "📊 *Market*\n"
+            f"🇺🇸 USD: *${usd:,.2f}* ({usd_sign}{usd_change:.2f}% {usd_emoji})\n"
+            f"🇮🇩 IDR: *Rp {idr:,.0f}* ({idr_sign}{idr_change:.2f}% {idr_emoji})\n"
+            f"🏦 Market Cap: *${market_cap:,.0f}*\n\n"
+            "🔁 *Quick Convert*\n"
+            "Gunakan `/convert 0.5` untuk konversi ETH."
         )
 
         return message

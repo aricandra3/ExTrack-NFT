@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -103,6 +104,207 @@ def _price_alert_crossed(alert_type: str, last_price: float | None, target_price
     return False
 
 
+def _format_empty_state(title: str, body: str, action_hint: str = "") -> str:
+    text = f"{title}\n\n{body}"
+    if action_hint:
+        text += f"\n\n{action_hint}"
+    return text
+
+
+def _format_watchlist(collections: list[str]) -> str:
+    if not collections:
+        return _format_empty_state(
+            "📌 *Watchlist Kosong*",
+            "Belum ada koleksi yang dipantau.",
+            "Mulai dengan `/track slug` atau cek cepat pakai `.p slug`."
+        )
+
+    lines = [
+        "📌 *Watchlist*",
+        f"Total: *{len(collections)}* koleksi",
+        "",
+    ]
+    for i, slug in enumerate(collections, 1):
+        lines.append(f"{i}. `{slug}`")
+        lines.append(f"   🔎 `.p {slug}`")
+    return "\n".join(lines)
+
+
+def _format_tracked_floor_results(results: list[tuple[str, str, float | None, str, str | None]],
+                                  idr_rate: float = 0) -> str:
+    lines = [
+        "📊 *Tracked Floors*",
+        f"Total: *{len(results)}* koleksi",
+        "",
+    ]
+    for slug, status, floor_price, symbol, error in results:
+        if status == "ok" and floor_price is not None:
+            idr_text = f" / Rp {floor_price * idr_rate:,.0f}" if idr_rate else ""
+            lines.append(f"🖼 `{slug}`")
+            lines.append(f"   💰 *{floor_price:.4f} {symbol}*{idr_text}")
+            lines.append(f"   🔎 `.p {slug}`")
+        else:
+            lines.append(f"🖼 `{slug}`")
+            lines.append(f"   ❌ {error or 'Gagal mengambil data'}")
+        lines.append("")
+    if idr_rate:
+        lines.append(f"💱 _1 ETH = Rp {idr_rate:,.0f}_")
+    return "\n".join(lines).strip()
+
+
+def _format_alerts_overview(price_alerts, percent_alerts, volume_alerts, gas_alerts) -> str:
+    total_count = len(price_alerts) + len(percent_alerts) + len(volume_alerts) + len(gas_alerts)
+    if total_count == 0:
+        return _format_empty_state(
+            "🔔 *Alert Center*",
+            "Belum ada alert aktif.",
+            "Buat alert dari menu atau pakai `/alert slug price`."
+        )
+
+    lines = [
+        "🔔 *Alert Center*",
+        f"Active: *{total_count}* alert",
+        "",
+    ]
+
+    if price_alerts:
+        lines.append("💰 *Price Alerts*")
+        for aid, slug, price, alert_type, recurring in price_alerts:
+            direction = "below" if alert_type == "below" else "above"
+            repeat_badge = " • recurring" if recurring else ""
+            lines.append(f"• `#{aid}` `{slug}` {direction} *{price} ETH*{repeat_badge}")
+        lines.append("")
+
+    if percent_alerts:
+        lines.append("📊 *Percentage Alerts*")
+        for aid, slug, percent, direction, recurring in percent_alerts:
+            repeat_badge = " • recurring" if recurring else ""
+            lines.append(f"• `#{aid}` `{slug}` {direction} *{percent}%*{repeat_badge}")
+        lines.append("")
+
+    if volume_alerts:
+        lines.append("💎 *Volume Alerts*")
+        for aid, slug, multiplier in volume_alerts:
+            lines.append(f"• `#{aid}` `{slug}` spike *{multiplier}x*")
+        lines.append("")
+
+    if gas_alerts:
+        lines.append("⛽ *Gas Alerts*")
+        for aid, gwei, alert_type in gas_alerts:
+            lines.append(f"• `#{aid}` {alert_type} *{gwei} gwei*")
+        lines.append("")
+
+    lines.append("_Hapus alert dengan_ `/delalert tipe id`")
+    return "\n".join(lines).strip()
+
+
+def _format_mint_reminders(reminders) -> str:
+    if not reminders:
+        return _format_empty_state(
+            "🗓 *Mint Reminders*",
+            "Belum ada mint yang dijadwalkan.",
+            "Tambah dengan `/addmint nama | harga | YYYY-MM-DD HH:MM | link`."
+        )
+
+    lines = [
+        "🗓 *Mint Reminders*",
+        f"Active: *{len(reminders)}* reminder",
+        "",
+    ]
+    for rid, name, price, mdate, link in reminders:
+        lines.append(f"*#{rid} — {name}*")
+        lines.append(f"💰 Price: *{price}*")
+        lines.append(f"📅 Date: `{mdate}`")
+        if link:
+            lines.append(f"🔗 [Mint Link]({link})")
+        else:
+            lines.append("🔗 No link")
+        lines.append("")
+
+    lines.append("_Hapus dengan_ `/removemint id`")
+    return "\n".join(lines).strip()
+
+
+def _format_price_alert_created(slug: str, current_price: float, symbol: str,
+                                target_price: float, alert_type: str, is_recurring: bool) -> str:
+    direction_text = "di bawah" if alert_type == "below" else "di atas"
+    direction_emoji = "📉" if alert_type == "below" else "📈"
+    lines = [
+        "✅ *Price Alert Created*",
+        f"Koleksi: `{slug}`",
+        "",
+        "📊 *Market*",
+        f"💰 Floor sekarang: *{current_price:.4f} {symbol}*",
+        f"{direction_emoji} Target: {direction_text} *{target_price} {symbol}*",
+    ]
+    if is_recurring:
+        lines.append("🔁 Recurring: *on*")
+    return "\n".join(lines)
+
+
+def _format_percent_alert_created(slug: str, ref_price: float, symbol: str,
+                                  percentage: float, direction: str, is_recurring: bool) -> str:
+    direction_text = {"up": "📈 naik", "down": "📉 turun", "both": "↕️ naik/turun"}
+    lines = [
+        "✅ *Percentage Alert Created*",
+        f"Koleksi: `{slug}`",
+        "",
+        "📊 *Market*",
+        f"💰 Harga referensi: *{ref_price:.4f} {symbol}*",
+        f"{direction_text[direction]} *{percentage}%*",
+    ]
+    if is_recurring:
+        lines.append("🔁 Recurring: *on*")
+    return "\n".join(lines)
+
+
+def _format_volume_alert_created(slug: str, multiplier: float) -> str:
+    return (
+        "✅ *Volume Alert Created*\n"
+        f"Koleksi: `{slug}`\n\n"
+        "📊 *Signal*\n"
+        f"💎 Trigger: volume *{multiplier}x* dari rata-rata"
+    )
+
+
+def _format_portfolio_item_added(slug: str, quantity: int, buy_price: float) -> str:
+    total_cost = quantity * buy_price
+    return (
+        "✅ *Portfolio Updated*\n"
+        f"Koleksi: `{slug}`\n\n"
+        "📊 *Position*\n"
+        f"🧾 Quantity: *{quantity} NFT*\n"
+        f"💰 Buy Price: *{buy_price:.4f} ETH*\n"
+        f"📦 Cost Basis: *{total_cost:.4f} ETH*"
+    )
+
+
+def _format_gas_alert_created(target_gwei: float, alert_type: str) -> str:
+    type_text = "di bawah" if alert_type == "below" else "di atas"
+    return (
+        "✅ *Gas Alert Created*\n"
+        "Ethereum network fee monitor\n\n"
+        "📊 *Signal*\n"
+        f"⛽ Alert saat gas {type_text} *{target_gwei:g} gwei*"
+    )
+
+
+def _format_mint_added(nft_name: str, mint_price: str, date_str: str, mint_link: str = "") -> str:
+    lines = [
+        "✅ *Mint Reminder Created*",
+        f"NFT: *{nft_name}*",
+        "",
+        "📊 *Mint Info*",
+        f"💰 Price: *{mint_price}*",
+        f"📅 Date: `{date_str}`",
+    ]
+    if mint_link:
+        lines.append(f"🔗 Link: {mint_link}")
+    lines.append("")
+    lines.append("_Reminder dikirim 30 menit dan 5 menit sebelum mint._")
+    return "\n".join(lines)
+
+
 # ============== Inline Keyboard Menus ==============
 
 def main_menu_keyboard():
@@ -192,90 +394,88 @@ def converter_menu_keyboard():
 
 MAIN_MENU_TEXT = (
     "🎨 *NFT Floor Price Tracker*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Selamat datang! Bot ini membantu Anda "
-    "memantau harga NFT dan gas Ethereum secara real-time.\n\n"
-    "Pilih kategori di bawah untuk memulai 👇"
+    "Live NFT market monitor\n\n"
+    "📊 *Tools*\n"
+    "💰 Floor, volume, dan recent sales\n"
+    "🔔 Price, volume, dan gas alerts\n"
+    "💼 Portfolio & mint reminders\n\n"
+    "Pilih menu di bawah."
 )
 
 PRICE_MENU_TEXT = (
     "📊 *Price & Tracking*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Pantau floor price koleksi NFT favoritmu.\n\n"
-    "Pilih perintah di bawah 👇"
+    "Floor, watchlist, dan market snapshot\n\n"
+    "🔎 Cepat: `.p slug`\n"
+    "📌 Alias: `.alias pendek slug-asli`"
 )
 
 ALERTS_MENU_TEXT = (
     "🔔 *Alert Center*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Kelola alert NFT Anda seperti di CoinGecko.\n"
-    "Buat alert baru, lihat semua alert aktif, atau hapus yang tidak diperlukan.\n\n"
-    "Pilih aksi di bawah 👇"
+    "Kelola sinyal market yang perlu dipantau\n\n"
+    "📈 Price movement\n"
+    "💎 Volume spike\n"
+    "⛽ Gas threshold"
 )
 
 CREATE_ALERT_MENU_TEXT = (
     "📊 *Buat Alert Baru*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "📉 *Floor < Target* — Alert saat floor di bawah harga target\n"
-    "📈 *Floor > Target* — Alert saat floor di atas harga target\n"
-    "📊 *% Perubahan* — Alert saat floor berubah X% dari harga saat ini\n"
-    "💎 *Volume Spike* — Alert saat volume melonjak\n\n"
-    "Pilih tipe alert di bawah 👇"
+    "Pilih sinyal yang ingin bot awasi\n\n"
+    "📉 Floor di bawah target\n"
+    "📈 Floor di atas target\n"
+    "📊 Perubahan persentase\n"
+    "💎 Volume spike"
 )
 
 PORTFOLIO_MENU_TEXT = (
-    "💼 *Portofolio*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Kelola koleksi NFT Anda dan pantau P/L & ROI.\n\n"
-    "Pilih perintah di bawah 👇"
+    "💼 *Portfolio*\n"
+    "Holdings, cost basis, P/L, dan ROI\n\n"
+    "➕ Tambah posisi NFT\n"
+    "📊 Cek valuasi terbaru"
 )
 
 GAS_MENU_TEXT = (
     "⛽ *Gas Fee*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Monitor harga gas Ethereum dan atur alert.\n\n"
-    "Pilih perintah di bawah 👇"
+    "Ethereum network fee monitor\n\n"
+    "🔥 Cek low/average/fast\n"
+    "⏰ Alert saat gas masuk target"
 )
 
 CONVERTER_MENU_TEXT = (
     "💱 *ETH ↔ IDR Converter*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "Cek harga ETH real-time dan konversi ke Rupiah.\n\n"
-    "Pilih perintah di bawah 👇"
+    "Live ETH rate dan kalkulator cepat\n\n"
+    "💰 Harga ETH sekarang\n"
+    "🔄 Konversi jumlah ETH ke fiat"
 )
 
 HELP_TEXT = (
     "📖 *Bantuan*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n\n"
-    "*Cara Pakai:*\n"
-    "1️⃣ Tap tombol kategori di bawah\n"
-    "2️⃣ Pilih perintah yang ingin digunakan\n"
-    "3️⃣ Ikuti format yang ditampilkan\n\n"
-    "*Tips:*\n"
-    "• Collection slug ada di URL OpenSea\n"
-    "  Contoh: `opensea.io/collection/boredapeyachtclub`\n"
-    "• Slug = `boredapeyachtclub`\n\n"
-    "Ketik /start untuk kembali ke menu utama."
+    "Cara cepat pakai bot\n\n"
+    "🔎 Floor: `.p slug`\n"
+    "📌 Track: `/track slug`\n"
+    "🔔 Alert: `/alert slug price`\n"
+    "📎 Alias: `.alias pendek slug-asli`\n\n"
+    "Slug ada di URL OpenSea, contoh:\n"
+    "`opensea.io/collection/boredapeyachtclub`"
 )
 
 # Prompts shown when asking for user input
 INPUT_PROMPTS = {
-    "floor": "🔍 *Floor Price*\n\nKetik slug koleksi NFT:\n\n_Contoh:_ `boredapeyachtclub`",
-    "track": "📌 *Track Koleksi*\n\nKetik slug koleksi yang ingin dipantau:\n\n_Contoh:_ `azuki`",
-    "untrack": "🗑 *Untrack Koleksi*\n\nKetik slug koleksi yang ingin dihapus dari pantauan:\n\n_Contoh:_ `azuki`",
-    "volume": "💎 *Volume Stats*\n\nKetik slug koleksi NFT:\n\n_Contoh:_ `boredapeyachtclub`",
-    "alert_below": "📉 *Price Alert (Floor < Target)*\n\nKetik slug dan harga target ETH:\n\n_Format:_ `slug harga [repeat]`\n_Contoh:_ `boredapeyachtclub 50`\n_Repeat:_ `boredapeyachtclub 50 repeat`",
-    "alert_above": "📈 *Price Alert (Floor > Target)*\n\nKetik slug dan harga target ETH:\n\n_Format:_ `slug harga [repeat]`\n_Contoh:_ `azuki 20`\n_Repeat:_ `azuki 20 repeat`",
-    "alert": "⚡ *Price Alert*\n\nKetik slug dan harga target:\n\n_Format:_ `slug harga [above/below] [repeat]`\n_Contoh:_ `boredapeyachtclub 50`\n_Contoh:_ `azuki 20 above repeat`",
-    "palert": "📊 *% Change Alert*\n\nKetik slug, persen, dan arah:\n\n_Format:_ `slug persen [up/down/both] [repeat]`\n_Contoh:_ `azuki 10 up`\n_Repeat:_ `azuki 10 up repeat`",
-    "valert": "📢 *Volume Alert*\n\nKetik slug dan multiplier:\n\n_Format:_ `slug [multiplier]`\n_Contoh:_ `azuki 3`",
-    "addnft": "➕ *Tambah NFT*\n\nKetik slug, jumlah, dan harga beli:\n\n_Format:_ `slug jumlah buy_price`\n_Contoh:_ `azuki 2 15.5`",
-    "removenft": "➖ *Hapus NFT*\n\nKetik slug koleksi yang ingin dihapus dari portofolio:\n\n_Contoh:_ `azuki`",
-    "gasalert": "⏰ *Gas Alert*\n\nKetik target gwei dan tipe:\n\n_Format:_ `gwei [below/above]`\n_Contoh:_ `25 below`",
-    "addmint": "🗓 *Mint Reminder*\n\nKetik info mint NFT:\n\n_Format:_ `nama | harga | YYYY-MM-DD HH:MM | link`\n_Contoh:_ `Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`",
-    "removemint": "🗑 *Hapus Mint Reminder*\n\nKetik ID reminder yang ingin dihapus:\n\n_Cek ID di_ `/mints`",
-    "convert": "🔄 *Konversi ETH*\n\nKetik jumlah ETH yang ingin dikonversi:\n\n_Contoh:_ `0.5` atau `2.5`",
-    "delalert": "🗑 *Hapus Alert*\n\nKetik tipe dan ID alert yang ingin dihapus:\n\n_Format:_ `tipe ID`\n_Tipe:_ `price` / `persen` / `volume` / `gas`\n_Contoh:_ `price 5`\n\n_Cek ID di_ 🔔 Lihat Semua Alerts",
+    "floor": "🔍 *Floor Price*\nKetik slug koleksi NFT.\n\nContoh: `boredapeyachtclub`",
+    "track": "📌 *Track Koleksi*\nKetik slug yang ingin dipantau.\n\nContoh: `azuki`",
+    "untrack": "🗑 *Untrack Koleksi*\nKetik slug yang ingin dihapus.\n\nContoh: `azuki`",
+    "volume": "💎 *Volume*\nKetik slug koleksi NFT.\n\nContoh: `boredapeyachtclub`",
+    "alert_below": "📉 *Price Alert*\nFloor di bawah target.\n\nFormat: `slug harga [repeat]`\nContoh: `boredapeyachtclub 50`",
+    "alert_above": "📈 *Price Alert*\nFloor di atas target.\n\nFormat: `slug harga [repeat]`\nContoh: `azuki 20`",
+    "alert": "⚡ *Price Alert*\nKetik slug dan harga target.\n\nFormat: `slug harga [above/below] [repeat]`\nContoh: `azuki 20 above repeat`",
+    "palert": "📊 *Percentage Alert*\nKetik slug, persen, dan arah.\n\nFormat: `slug persen [up/down/both] [repeat]`\nContoh: `azuki 10 up`",
+    "valert": "💎 *Volume Alert*\nKetik slug dan multiplier.\n\nFormat: `slug [multiplier]`\nContoh: `azuki 3`",
+    "addnft": "➕ *Tambah NFT*\nKetik slug, jumlah, dan harga beli.\n\nFormat: `slug jumlah buy_price`\nContoh: `azuki 2 15.5`",
+    "removenft": "➖ *Hapus NFT*\nKetik slug yang ingin dihapus dari portfolio.\n\nContoh: `azuki`",
+    "gasalert": "⏰ *Gas Alert*\nKetik target gwei dan tipe.\n\nFormat: `gwei [below/above]`\nContoh: `25 below`",
+    "addmint": "🗓 *Mint Reminder*\nKetik info mint NFT.\n\nFormat: `nama | harga | YYYY-MM-DD HH:MM | link`\nContoh: `Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`",
+    "removemint": "🗑 *Hapus Mint Reminder*\nKetik ID reminder yang ingin dihapus.\n\nCek ID: `/mints`",
+    "convert": "🔄 *ETH Converter*\nKetik jumlah ETH.\n\nContoh: `0.5` atau `2.5`",
+    "delalert": "🗑 *Hapus Alert*\nKetik tipe dan ID alert.\n\nFormat: `tipe ID`\nTipe: `price` / `persen` / `volume` / `gas`\nContoh: `price 5`",
 }
 
 
@@ -334,12 +534,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ---- No-arg commands: execute directly ----
     if data == "cmd_list":
         collections = db.get_tracked_collections(user_id)
-        if not collections:
-            text = "📋 Anda belum memantau koleksi apapun.\nGunakan 📌 Track untuk memulai."
-        else:
-            text = "📋 *Koleksi yang Anda pantau:*\n\n"
-            for i, slug in enumerate(collections, 1):
-                text += f"{i}. `{slug}`\n"
+        text = _format_watchlist(collections)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📌 Track Baru", callback_data="cmd_track"),
              InlineKeyboardButton("📊 Cek Harga", callback_data="cmd_check")],
@@ -352,7 +547,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "cmd_check":
         collections = db.get_tracked_collections(user_id)
         if not collections:
-            text = "📋 Anda belum memantau koleksi apapun.\nGunakan 📌 Track untuk memulai."
+            text = _format_watchlist(collections)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price")]
@@ -362,20 +557,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("🔍 Mengambil data harga...")
         eth_data = await price_api.get_eth_price()
         idr_rate = eth_data.get("idr", 0) if eth_data and "error" not in eth_data else 0
-        text = "📊 *Floor Price Koleksi Anda:*\n\n"
+        results = []
         for slug in collections:
             stats = await opensea_api.get_collection_stats(slug)
             if stats and "error" not in stats:
                 total = stats.get("total", {})
                 floor_price = total.get("floor_price", 0)
                 symbol = total.get("floor_price_symbol", "ETH")
-                idr_str = f" (~Rp {floor_price * idr_rate:,.0f})" if idr_rate > 0 else ""
-                text += f"• `{slug}`: *{floor_price:.4f} {symbol}*{idr_str}\n"
+                results.append((slug, "ok", floor_price, symbol, None))
             else:
                 error = stats.get("error", "Unknown error") if stats else "Failed to fetch"
-                text += f"• `{slug}`: ❌ {error}\n"
-        if idr_rate > 0:
-            text += f"\n_💱 Rate: 1 ETH = Rp {idr_rate:,.0f}_"
+                results.append((slug, "error", None, "ETH", error))
+        text = _format_tracked_floor_results(results, idr_rate)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
@@ -389,38 +582,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         volume_alerts = db.get_volume_alerts(user_id)
         gas_alerts_list = db.get_gas_alerts(user_id)
         if not price_alerts and not percent_alerts and not volume_alerts and not gas_alerts_list:
-            text = "🔔 Anda belum memiliki alert aktif."
+            text = _format_alerts_overview(price_alerts, percent_alerts, volume_alerts, gas_alerts_list)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Buat Alert", callback_data="menu_create_alert"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts")]
             ])
         else:
-            total_count = len(price_alerts) + len(percent_alerts) + len(volume_alerts) + len(gas_alerts_list)
-            text = f"🔔 *Alert Aktif ({total_count})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
-            if price_alerts:
-                text += "*💰 Price Alerts:*\n"
-                for aid, slug, price, alert_type, recurring in price_alerts:
-                    direction = "📉 <" if alert_type == "below" else "📈 >"
-                    repeat_badge = " 🔁" if recurring else ""
-                    text += f"  `#{aid}` `{slug}` {direction} *{price} ETH*{repeat_badge}\n"
-                text += "\n"
-            if percent_alerts:
-                text += "*📊 % Change Alerts:*\n"
-                for aid, slug, percent, direction, recurring in percent_alerts:
-                    dir_emoji = "📈" if direction == "up" else "📉" if direction == "down" else "↕️"
-                    repeat_badge = " 🔁" if recurring else ""
-                    text += f"  `#{aid}` `{slug}` {dir_emoji} *{percent}%* {direction}{repeat_badge}\n"
-                text += "\n"
-            if volume_alerts:
-                text += "*💎 Volume Alerts:*\n"
-                for aid, slug, multiplier in volume_alerts:
-                    text += f"  `#{aid}` `{slug}` spike *{multiplier}x*\n"
-                text += "\n"
-            if gas_alerts_list:
-                text += "*⛽ Gas Alerts:*\n"
-                for aid, gwei, alert_type in gas_alerts_list:
-                    text += f"  `#{aid}` {alert_type} *{gwei} gwei*\n"
-            text += "\n_🔁 = recurring (alert aktif kembali setelah trigger)_"
+            text = _format_alerts_overview(price_alerts, percent_alerts, volume_alerts, gas_alerts_list)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📊 Tambah Alert", callback_data="menu_create_alert"),
                  InlineKeyboardButton("🗑 Hapus Alert", callback_data="cmd_delalert")],
@@ -433,7 +601,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "cmd_portfolio":
         portfolio = db.get_portfolio(user_id)
         if not portfolio:
-            text = "💼 Portofolio Anda kosong."
+            text = _format_empty_state(
+                "💼 *Portfolio*",
+                "Belum ada posisi NFT yang tersimpan.",
+                "Tambah posisi dengan `/addnft slug jumlah buy_price`."
+            )
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Tambah NFT", callback_data="cmd_addnft"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_portfolio")]
@@ -441,7 +613,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
             return
         await query.edit_message_text("💼 Menghitung portofolio Anda...")
-        text = "💼 *Portofolio Anda*\n\n"
+        text = f"💼 *Portfolio*\nHoldings: *{len(portfolio)}* koleksi\n\n"
         total_cost = 0
         total_value = 0
         for slug, quantity, buy_price, _ in portfolio:
@@ -471,12 +643,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         total_roi = ((total_value - total_cost) / total_cost * 100) if total_cost > 0 else 0
         emoji = "🟢" if total_pl >= 0 else "🔴"
         sign = "+" if total_pl >= 0 else ""
-        text += "━━━━━━━━━━━━━━━━\n"
-        text += f"📊 *TOTAL*\n"
-        text += f"├ Cost Basis: *{total_cost:.4f} ETH*\n"
-        text += f"├ Current Value: *{total_value:.4f} ETH*\n"
-        text += f"├ Unrealized P/L: *{sign}{total_pl:.4f} ETH*\n"
-        text += f"└ ROI: *{sign}{total_roi:.1f}%* {emoji}"
+        text += "📊 *Summary*\n"
+        text += f"Cost Basis: *{total_cost:.4f} ETH*\n"
+        text += f"Current Value: *{total_value:.4f} ETH*\n"
+        text += f"Unrealized P/L: *{sign}{total_pl:.4f} ETH* {emoji}\n"
+        text += f"ROI: *{sign}{total_roi:.1f}%*"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_portfolio"),
              InlineKeyboardButton("➕ Tambah NFT", callback_data="cmd_addnft")],
@@ -515,22 +686,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == "cmd_mints":
         reminders = db.get_mint_reminders(user_id)
         if not reminders:
-            text = "🗓 Anda belum memiliki mint reminder."
+            text = _format_mint_reminders(reminders)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Tambah Reminder", callback_data="cmd_addmint"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts")]
             ])
         else:
-            text = "🗓 *Mint Reminders Aktif:*\n\n"
-            for rid, name, price, mdate, link in reminders:
-                text += f"*#{rid} — {name}*\n"
-                text += f"├ 💰 Price: {price}\n"
-                text += f"├ 📅 Date: `{mdate}`\n"
-                if link:
-                    text += f"└ 🔗 [Mint Link]({link})\n"
-                else:
-                    text += f"└ 🔗 No link\n"
-                text += "\n"
+            text = _format_mint_reminders(reminders)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Tambah", callback_data="cmd_addmint"),
                  InlineKeyboardButton("🗑 Hapus", callback_data="cmd_removemint")],
@@ -634,13 +796,12 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         usd_value = eth_amount * usd_rate
         idr_value = eth_amount * idr_rate
         msg = (
-            f"💱 *Konversi ETH*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🔢 *Jumlah:* `{eth_amount} ETH`\n\n"
-            f"🇺🇸 *USD:*  `${usd_value:,.2f}`\n"
-            f"🇮🇩 *IDR:*  `Rp {idr_value:,.0f}`\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 _Rate: 1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
+            f"💱 *ETH Converter*\n"
+            f"Amount: *{eth_amount} ETH*\n\n"
+            f"📊 *Result*\n"
+            f"🇺🇸 USD: *${usd_value:,.2f}*\n"
+            f"🇮🇩 IDR: *Rp {idr_value:,.0f}*\n\n"
+            f"💹 _1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
         )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Konversi Lagi", callback_data="cmd_convert"),
@@ -653,34 +814,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     # ---- Single-arg commands ----
     if action == "floor":
         slug = text.split()[0].lower()
-        await update.message.reply_text(
-            f"🔍 Mencari data untuk `{slug}`...",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        overview_task = opensea_api.get_collection_overview(slug)
-        eth_task = price_api.get_eth_price()
-        (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
-        if stats is None:
-            await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
-            return
-        message = opensea_api.format_floor_price(
-            stats,
-            collection_info,
-            sales_data=sales_data,
-            eth_price=eth_data,
-            collection_slug=slug,
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ Set Alert", callback_data=f"qa_alert_{slug}"),
-             InlineKeyboardButton("📌 Add Watchlist", callback_data=f"qa_track_{slug}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
-        await update.message.reply_text(
-            message,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+        await send_floor_overview(update.message, slug)
         return
 
     if action == "track":
@@ -726,7 +860,9 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
             return
         previous_volume = db.get_average_volume(slug)
-        message = opensea_api.format_volume_stats(stats, collection_info, previous_volume)
+        message = opensea_api.format_volume_stats(
+            stats, collection_info, previous_volume, collection_slug=slug
+        )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📢 Set Volume Alert", callback_data=f"qa_valert_{slug}"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
@@ -799,16 +935,10 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         success = db.add_price_alert(user_id, slug, target_price, alert_type,
                                       is_recurring=is_recurring, current_price=current_price)
-        direction_text = "di bawah" if alert_type == "below" else "di atas"
-        direction_emoji = "📉" if alert_type == "below" else "📈"
-        repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
         if success:
-            msg = (f"✅ *Alert Berhasil Dibuat!*\n"
-                   f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"📦 Koleksi: `{slug}`\n"
-                   f"💰 Floor saat ini: *{current_price:.4f} {symbol}*\n"
-                   f"{direction_emoji} Target: {direction_text} *{target_price} {symbol}*"
-                   f"{repeat_text}")
+            msg = _format_price_alert_created(
+                slug, current_price, symbol, target_price, alert_type, is_recurring
+            )
         else:
             msg = f"ℹ️ Alert untuk `{slug}` dengan target {target_price} {symbol} ({alert_type}) sudah ada."
         keyboard = InlineKeyboardMarkup([
@@ -852,15 +982,10 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         success = db.add_percentage_alert(user_id, slug, percentage, direction,
                                            is_recurring=is_recurring, reference_price=ref_price)
-        direction_text = {"up": "📈 naik", "down": "📉 turun", "both": "↕️ naik/turun"}
-        repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
         if success:
-            msg = (f"✅ *% Alert Berhasil Dibuat!*\n"
-                   f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"📦 Koleksi: `{slug}`\n"
-                   f"💰 Harga referensi: *{ref_price:.4f} {symbol}*\n"
-                   f"{direction_text[direction]} *{percentage}%*"
-                   f"{repeat_text}")
+            msg = _format_percent_alert_created(
+                slug, ref_price, symbol, percentage, direction, is_recurring
+            )
         else:
             msg = f"ℹ️ Alert untuk `{slug}` dengan setting ini sudah ada."
         keyboard = InlineKeyboardMarkup([
@@ -895,10 +1020,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
         success = db.add_volume_alert(user_id, slug, multiplier)
         if success:
-            msg = (f"✅ *Volume Alert Berhasil Dibuat!*\n"
-                   f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                   f"📦 Koleksi: `{slug}`\n"
-                   f"💎 Trigger: Volume *{multiplier}x* dari rata-rata")
+            msg = _format_volume_alert_created(slug, multiplier)
         else:
             msg = f"ℹ️ Volume alert untuk `{slug}` sudah ada."
         keyboard = InlineKeyboardMarkup([
@@ -971,12 +1093,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
         success = db.add_portfolio_item(user_id, slug, quantity, buy_price)
         if success:
-            total_cost = quantity * buy_price
-            msg = (f"✅ NFT berhasil ditambahkan ke portofolio!\n\n"
-                   f"Koleksi: `{slug}`\n"
-                   f"Jumlah: *{quantity} NFT*\n"
-                   f"Buy Price: *{buy_price} ETH* per NFT\n"
-                   f"Total Cost: *{total_cost:.4f} ETH*")
+            msg = _format_portfolio_item_added(slug, quantity, buy_price)
         else:
             msg = "❌ Gagal menambahkan ke portofolio."
         keyboard = InlineKeyboardMarkup([
@@ -997,10 +1114,8 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if alert_type not in ["below", "above"]:
             alert_type = "below"
         success = db.add_gas_alert(user_id, target_gwei, alert_type)
-        type_text = "di bawah" if alert_type == "below" else "di atas"
         if success:
-            msg = (f"⛽ Gas Alert berhasil diset!\n\n"
-                   f"Alert: Gas {type_text} *{target_gwei} gwei*")
+            msg = _format_gas_alert_created(target_gwei, alert_type)
         else:
             msg = "ℹ️ Gas alert dengan setting ini sudah ada."
         keyboard = InlineKeyboardMarkup([
@@ -1034,13 +1149,7 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
         success = db.add_mint_reminder(user_id, nft_name, mint_price, date_str, mint_link)
         if success:
-            msg = (f"🗓 Mint Reminder berhasil ditambahkan!\n\n"
-                   f"NFT: *{nft_name}*\n"
-                   f"Price: {mint_price}\n"
-                   f"Date: `{date_str}`\n")
-            if mint_link:
-                msg += f"Link: {mint_link}\n"
-            msg += "\n_Bot akan mengingatkan 30 menit & 5 menit sebelum mint._"
+            msg = _format_mint_added(nft_name, mint_price, date_str, mint_link)
         else:
             msg = "❌ Gagal menambahkan reminder."
         keyboard = InlineKeyboardMarkup([
@@ -1067,6 +1176,101 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+
+def _valid_alias(alias: str) -> bool:
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", alias.lower()))
+
+
+async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle lightweight dot shortcuts like .p bonsai and .alias bonsai on-chain-bonsai."""
+    text = (update.message.text or "").strip()
+    if not text.startswith("."):
+        return
+
+    parts = text.split()
+    command = parts[0].lower()
+    user_id = update.effective_user.id
+
+    if command in (".p", ".fp", ".floor"):
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "❌ Format: `.p slug_or_alias`\n"
+                "Contoh: `.p azuki`\n"
+                "Alias: `.alias bonsai on-chain-bonsai`, lalu `.p bonsai`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        key = parts[1].lower()
+        slug = db.get_slug_alias(user_id, key) or key
+        await send_floor_overview(update.message, slug)
+        return
+
+    if command in (".alias", ".setalias"):
+        if len(parts) < 3:
+            await update.message.reply_text(
+                "❌ Format: `.alias nama_pendek slug_asli`\n"
+                "Contoh: `.alias bonsai on-chain-bonsai`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        alias = parts[1].lower()
+        slug = parts[2].lower()
+        if not _valid_alias(alias):
+            await update.message.reply_text(
+                "❌ Alias hanya boleh huruf kecil, angka, `_`, atau `-`, maksimal 32 karakter.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        await update.message.reply_text(f"🔍 Memverifikasi `{slug}`...", parse_mode=ParseMode.MARKDOWN)
+        stats = await opensea_api.get_collection_stats(slug)
+        if stats and "error" in stats:
+            await update.message.reply_text(f"❌ {stats['error']}")
+            return
+
+        if db.set_slug_alias(user_id, alias, slug):
+            await update.message.reply_text(
+                f"✅ Alias disimpan: `.{alias}` → `{slug}`\n"
+                f"Pakai: `.p {alias}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ Gagal menyimpan alias.")
+        return
+
+    if command in (".aliases", ".aliaslist"):
+        aliases = db.get_slug_aliases(user_id)
+        if not aliases:
+            await update.message.reply_text(
+                "📎 Belum ada alias.\nContoh buat: `.alias bonsai on-chain-bonsai`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        msg = "📎 *Alias Slug Anda:*\n\n"
+        for alias, slug in aliases:
+            msg += f"• `{alias}` → `{slug}`\n"
+        msg += "\nPakai: `.p nama_alias`"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if command in (".delalias", ".unalias"):
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "❌ Format: `.delalias nama_alias`\nContoh: `.delalias bonsai`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        alias = parts[1].lower()
+        if db.remove_slug_alias(user_id, alias):
+            await update.message.reply_text(f"✅ Alias `{alias}` dihapus.", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(f"❌ Alias `{alias}` tidak ditemukan.", parse_mode=ParseMode.MARKDOWN)
         return
 
 
@@ -1098,6 +1302,43 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(commands)
 
 
+async def send_floor_overview(message, collection_slug: str) -> None:
+    """Send the rich floor/market overview for a collection slug."""
+    slug = collection_slug.lower().strip()
+    await message.reply_text(f"🔍 Mencari data untuk `{slug}`...", parse_mode=ParseMode.MARKDOWN)
+
+    overview_task = opensea_api.get_collection_overview(slug)
+    eth_task = price_api.get_eth_price()
+    (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
+
+    if stats is None:
+        await message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
+        return
+
+    if isinstance(stats, dict) and "error" in stats:
+        await message.reply_text(f"❌ {stats['error']}")
+        return
+
+    text = opensea_api.format_floor_price(
+        stats,
+        collection_info,
+        sales_data=sales_data,
+        eth_price=eth_data,
+        collection_slug=slug,
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Set Alert", callback_data=f"qa_alert_{slug}"),
+         InlineKeyboardButton("📌 Add Watchlist", callback_data=f"qa_track_{slug}")],
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+    ])
+    await message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+
 async def floor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get floor price for a collection."""
     if not context.args:
@@ -1109,37 +1350,7 @@ async def floor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     collection_slug = context.args[0].lower()
-    await update.message.reply_text(f"🔍 Mencari data untuk `{collection_slug}`...",
-                                     parse_mode=ParseMode.MARKDOWN)
-
-    # Get market stats, collection info, recent sales, and ETH fiat rates in parallel.
-    overview_task = opensea_api.get_collection_overview(collection_slug)
-    eth_task = price_api.get_eth_price()
-    (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
-
-    if stats is None:
-        await update.message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
-        return
-
-    message = opensea_api.format_floor_price(
-        stats,
-        collection_info,
-        sales_data=sales_data,
-        eth_price=eth_data,
-        collection_slug=collection_slug,
-    )
-    # Quick action buttons after floor check
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ Set Alert", callback_data=f"qa_alert_{collection_slug}"),
-         InlineKeyboardButton("📌 Add Watchlist", callback_data=f"qa_track_{collection_slug}")],
-        [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-    ])
-    await update.message.reply_text(
-        message,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard,
-        disable_web_page_preview=True,
-    )
+    await send_floor_overview(update.message, collection_slug)
 
 
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1207,19 +1418,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id
     collections = db.get_tracked_collections(user_id)
 
-    if not collections:
-        await update.message.reply_text(
-            "📋 Anda belum memantau koleksi apapun.\n"
-            "Gunakan `/track <collection_slug>` untuk memulai.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    message = "📋 *Koleksi yang Anda pantau:*\n\n"
-    for i, slug in enumerate(collections, 1):
-        message += f"{i}. `{slug}`\n"
-
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(_format_watchlist(collections), parse_mode=ParseMode.MARKDOWN)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1229,15 +1428,16 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not collections:
         await update.message.reply_text(
-            "📋 Anda belum memantau koleksi apapun.\n"
-            "Gunakan `/track <collection_slug>` untuk memulai.",
+            _format_watchlist(collections),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
     await update.message.reply_text("🔍 Mengambil data harga...")
 
-    message = "📊 *Floor Price Koleksi Anda:*\n\n"
+    eth_data = await price_api.get_eth_price()
+    idr_rate = eth_data.get("idr", 0) if eth_data and "error" not in eth_data else 0
+    results = []
 
     for slug in collections:
         stats = await opensea_api.get_collection_stats(slug)
@@ -1245,12 +1445,15 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             total = stats.get("total", {})
             floor_price = total.get("floor_price", 0)
             symbol = total.get("floor_price_symbol", "ETH")
-            message += f"• `{slug}`: *{floor_price:.4f} {symbol}*\n"
+            results.append((slug, "ok", floor_price, symbol, None))
         else:
             error = stats.get("error", "Unknown error") if stats else "Failed to fetch"
-            message += f"• `{slug}`: ❌ {error}\n"
+            results.append((slug, "error", None, "ETH", error))
 
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        _format_tracked_floor_results(results, idr_rate),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1299,18 +1502,11 @@ async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     success = db.add_price_alert(user_id, collection_slug, target_price, alert_type,
                                  is_recurring=is_recurring, current_price=current_price)
 
-    direction_text = "di bawah" if alert_type == "below" else "di atas"
-    direction_emoji = "📉" if alert_type == "below" else "📈"
-    repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
-
     if success:
         await update.message.reply_text(
-            f"✅ *Alert Berhasil Dibuat!*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 Koleksi: `{collection_slug}`\n"
-            f"💰 Floor saat ini: *{current_price:.4f} {symbol}*\n"
-            f"{direction_emoji} Target: {direction_text} *{target_price} {symbol}*"
-            f"{repeat_text}",
+            _format_price_alert_created(
+                collection_slug, current_price, symbol, target_price, alert_type, is_recurring
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -1330,47 +1526,10 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     volume_alerts = db.get_volume_alerts(user_id)
     gas_alerts = db.get_gas_alerts(user_id)
 
-    if not price_alerts and not percent_alerts and not volume_alerts and not gas_alerts:
-        await update.message.reply_text(
-            "🔔 Anda belum memiliki alert aktif.\n"
-            "Gunakan `/alert`, `/palert`, `/valert`, atau `/gasalert` untuk membuat alert.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-
-    message = f"🔔 *Alert Aktif ({len(price_alerts) + len(percent_alerts) + len(volume_alerts) + len(gas_alerts)})*\n━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    if price_alerts:
-        message += "*💰 Price Alerts:*\n"
-        for aid, slug, price, alert_type, recurring in price_alerts:
-            direction = "📉 <" if alert_type == "below" else "📈 >"
-            repeat_badge = " 🔁" if recurring else ""
-            message += f"  `#{aid}` `{slug}` {direction} *{price} ETH*{repeat_badge}\n"
-        message += "\n"
-
-    if percent_alerts:
-        message += "*📊 % Change Alerts:*\n"
-        for aid, slug, percent, direction, recurring in percent_alerts:
-            dir_emoji = "📈" if direction == "up" else "📉" if direction == "down" else "↕️"
-            repeat_badge = " 🔁" if recurring else ""
-            message += f"  `#{aid}` `{slug}` {dir_emoji} *{percent}%* {direction}{repeat_badge}\n"
-        message += "\n"
-
-    if volume_alerts:
-        message += "*💎 Volume Alerts:*\n"
-        for aid, slug, multiplier in volume_alerts:
-            message += f"  `#{aid}` `{slug}` spike *{multiplier}x*\n"
-        message += "\n"
-
-    if gas_alerts:
-        message += "*⛽ Gas Alerts:*\n"
-        for aid, gwei, alert_type in gas_alerts:
-            message += f"  `#{aid}` {alert_type} *{gwei} gwei*\n"
-
-    message += "\n_🔁 = recurring (alert aktif kembali setelah trigger)_\n\n"
-    message += "_Gunakan_ `/delalert <tipe> <id>` _untuk menghapus._"
-
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        _format_alerts_overview(price_alerts, percent_alerts, volume_alerts, gas_alerts),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def delalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Delete an alert by ID."""
@@ -1462,17 +1621,11 @@ async def palert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     success = db.add_percentage_alert(user_id, collection_slug, percentage, direction,
                                       is_recurring=is_recurring, reference_price=ref_price)
 
-    direction_text = {"up": "📈 naik", "down": "📉 turun", "both": "↕️ naik/turun"}
-    repeat_text = "\n🔁 _Recurring: alert aktif kembali setelah trigger_" if is_recurring else ""
-
     if success:
         await update.message.reply_text(
-            f"✅ *% Alert Berhasil Dibuat!*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 Koleksi: `{collection_slug}`\n"
-            f"💰 Harga referensi: *{ref_price:.4f} {symbol}*\n"
-            f"{direction_text[direction]} *{percentage}%*"
-            f"{repeat_text}",
+            _format_percent_alert_created(
+                collection_slug, ref_price, symbol, percentage, direction, is_recurring
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -1507,7 +1660,9 @@ async def volume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Get previous volume for comparison
     previous_volume = db.get_average_volume(collection_slug)
 
-    message = opensea_api.format_volume_stats(stats, collection_info, previous_volume)
+    message = opensea_api.format_volume_stats(
+        stats, collection_info, previous_volume, collection_slug=collection_slug
+    )
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1542,10 +1697,7 @@ async def valert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if success:
         await update.message.reply_text(
-            f"📊 Volume Spike Alert berhasil diset!\n\n"
-            f"Koleksi: `{collection_slug}`\n"
-            f"Trigger: Volume *{multiplier}x* dari rata-rata\n\n"
-            f"Bot akan monitor volume 24h dan bandingkan dengan rata-rata 7 hari.",
+            _format_volume_alert_created(collection_slug, multiplier),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -1588,13 +1740,8 @@ async def addnft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     success = db.add_portfolio_item(user_id, collection_slug, quantity, buy_price)
 
     if success:
-        total_cost = quantity * buy_price
         await update.message.reply_text(
-            f"✅ NFT berhasil ditambahkan ke portofolio!\n\n"
-            f"Koleksi: `{collection_slug}`\n"
-            f"Jumlah: *{quantity} NFT*\n"
-            f"Buy Price: *{buy_price} ETH* per NFT\n"
-            f"Total Cost: *{total_cost:.4f} ETH*",
+            _format_portfolio_item_added(collection_slug, quantity, buy_price),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -1635,15 +1782,18 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if not portfolio:
         await update.message.reply_text(
-            "💼 Portofolio Anda kosong.\n"
-            "Gunakan `/addnft <slug> <jumlah> <buy_price>` untuk menambahkan.",
+            _format_empty_state(
+                "💼 *Portfolio*",
+                "Belum ada posisi NFT yang tersimpan.",
+                "Tambah posisi dengan `/addnft slug jumlah buy_price`."
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
     await update.message.reply_text("💼 Menghitung portofolio Anda...")
 
-    message = "💼 *Portofolio Anda*\n\n"
+    message = f"💼 *Portfolio*\nHoldings: *{len(portfolio)}* koleksi\n\n"
     total_cost = 0
     total_value = 0
 
@@ -1683,12 +1833,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     emoji = "🟢" if total_pl >= 0 else "🔴"
     sign = "+" if total_pl >= 0 else ""
 
-    message += "━━━━━━━━━━━━━━━━\n"
-    message += f"📊 *TOTAL*\n"
-    message += f"├ Cost Basis: *{total_cost:.4f} ETH*\n"
-    message += f"├ Current Value: *{total_value:.4f} ETH*\n"
-    message += f"├ Unrealized P/L: *{sign}{total_pl:.4f} ETH*\n"
-    message += f"└ ROI: *{sign}{total_roi:.1f}%* {emoji}"
+    message += "📊 *Summary*\n"
+    message += f"Cost Basis: *{total_cost:.4f} ETH*\n"
+    message += f"Current Value: *{total_value:.4f} ETH*\n"
+    message += f"Unrealized P/L: *{sign}{total_pl:.4f} ETH* {emoji}\n"
+    message += f"ROI: *{sign}{total_roi:.1f}%*"
 
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
@@ -1731,13 +1880,12 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     idr_value = eth_amount * idr_rate
 
     message = (
-        f"💱 *Konversi ETH*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔢 *Jumlah:* `{eth_amount} ETH`\n\n"
-        f"🇺🇸 *USD:*  `${usd_value:,.2f}`\n"
-        f"🇮🇩 *IDR:*  `Rp {idr_value:,.0f}`\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 _Rate: 1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
+        f"💱 *ETH Converter*\n"
+        f"Amount: *{eth_amount} ETH*\n\n"
+        f"📊 *Result*\n"
+        f"🇺🇸 USD: *${usd_value:,.2f}*\n"
+        f"🇮🇩 IDR: *Rp {idr_value:,.0f}*\n\n"
+        f"💹 _1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
     )
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
@@ -1778,13 +1926,9 @@ async def gasalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     success = db.add_gas_alert(user_id, target_gwei, alert_type)
 
-    type_text = "di bawah" if alert_type == "below" else "di atas"
-
     if success:
         await update.message.reply_text(
-            f"⛽ Gas Alert berhasil diset!\n\n"
-            f"Alert: Gas {type_text} *{target_gwei} gwei*\n\n"
-            f"Anda akan mendapat notifikasi ketika gas mencapai target.",
+            _format_gas_alert_created(target_gwei, alert_type),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -2069,13 +2213,7 @@ async def addmint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     success = db.add_mint_reminder(user_id, nft_name, mint_price, date_str, mint_link)
 
     if success:
-        msg = (f"🗓 Mint Reminder berhasil ditambahkan!\n\n"
-               f"NFT: *{nft_name}*\n"
-               f"Price: {mint_price}\n"
-               f"Date: `{date_str}`\n")
-        if mint_link:
-            msg += f"Link: {mint_link}\n"
-        msg += "\n_Bot akan mengingatkan 30 menit & 5 menit sebelum mint._"
+        msg = _format_mint_added(nft_name, mint_price, date_str, mint_link)
     else:
         msg = "❌ Gagal menambahkan reminder."
 
@@ -2089,24 +2227,12 @@ async def mints_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not reminders:
         await update.message.reply_text(
-            "🗓 Anda belum memiliki mint reminder.\n"
-            "Gunakan `/addmint` untuk menambahkan.",
+            _format_mint_reminders(reminders),
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    message = "🗓 *Mint Reminders Aktif:*\n\n"
-    for rid, name, price, mdate, link in reminders:
-        message += f"*#{rid} — {name}*\n"
-        message += f"├ 💰 Price: {price}\n"
-        message += f"├ 📅 Date: `{mdate}`\n"
-        if link:
-            message += f"└ 🔗 [Mint Link]({link})\n"
-        else:
-            message += f"└ 🔗 No link\n"
-        message += "\n"
-
-    message += "_Hapus dengan_ `/removemint <id>`"
+    message = _format_mint_reminders(reminders)
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
@@ -2233,6 +2359,11 @@ def main() -> None:
 
     # Add callback handler for inline keyboard buttons
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Add lightweight dot command handler, e.g. ".p azuki" or ".p myalias"
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r"^\."), dot_command_handler
+    ))
 
     # Add message handler for pending input from menu buttons
     application.add_handler(MessageHandler(
