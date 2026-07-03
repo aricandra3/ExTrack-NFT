@@ -111,6 +111,23 @@ def _format_empty_state(title: str, body: str, action_hint: str = "") -> str:
     return text
 
 
+def _escape_md_text(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("[", "\\[")
+        .replace("`", "'")
+    )
+
+
+def _compact_slug(slug: str, max_len: int = 34) -> str:
+    if len(slug) <= max_len:
+        return slug
+    return f"{slug[:max_len - 3]}..."
+
+
 def _format_watchlist(collections: list[str]) -> str:
     if not collections:
         return _format_empty_state(
@@ -121,12 +138,17 @@ def _format_watchlist(collections: list[str]) -> str:
 
     lines = [
         "📌 *Watchlist*",
-        f"Total: *{len(collections)}* koleksi",
+        f"{len(collections)} koleksi dipantau",
         "",
     ]
     for i, slug in enumerate(collections, 1):
-        lines.append(f"{i}. `{slug}`")
-        lines.append(f"   🔎 `.p {slug}`")
+        display_slug = _escape_md_text(_compact_slug(slug))
+        lines.append(f"{i}. *{display_slug}*")
+    lines.extend([
+        "",
+        "🔎 Detail cepat: `.p slug`",
+        "📎 Pendekkan slug: `.alias nama slug-asli`",
+    ])
     return "\n".join(lines)
 
 
@@ -134,21 +156,23 @@ def _format_tracked_floor_results(results: list[tuple[str, str, float | None, st
                                   idr_rate: float = 0) -> str:
     lines = [
         "📊 *Tracked Floors*",
-        f"Total: *{len(results)}* koleksi",
+        f"{len(results)} koleksi dipantau",
         "",
     ]
-    for slug, status, floor_price, symbol, error in results:
+    for index, (slug, status, floor_price, symbol, error) in enumerate(results, 1):
+        display_slug = _escape_md_text(_compact_slug(slug))
         if status == "ok" and floor_price is not None:
-            idr_text = f" / Rp {floor_price * idr_rate:,.0f}" if idr_rate else ""
-            lines.append(f"🖼 `{slug}`")
-            lines.append(f"   💰 *{floor_price:.4f} {symbol}*{idr_text}")
-            lines.append(f"   🔎 `.p {slug}`")
+            idr_text = f" • Rp {floor_price * idr_rate:,.0f}" if idr_rate else ""
+            lines.append(f"{index}. *{display_slug}*")
+            lines.append(f"   Floor: *{floor_price:.4f} {symbol}*{idr_text}")
         else:
-            lines.append(f"🖼 `{slug}`")
-            lines.append(f"   ❌ {error or 'Gagal mengambil data'}")
-        lines.append("")
+            safe_error = _escape_md_text(error or "Gagal mengambil data")
+            lines.append(f"{index}. *{display_slug}*")
+            lines.append(f"   Status: ❌ {safe_error}")
+    lines.append("")
     if idr_rate:
         lines.append(f"💱 _1 ETH = Rp {idr_rate:,.0f}_")
+    lines.append("🔎 Detail koleksi: `.p slug`")
     return "\n".join(lines).strip()
 
 
