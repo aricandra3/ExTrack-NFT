@@ -83,6 +83,56 @@ class OpenSeaAPI:
             stats, info, sales = await asyncio.gather(stats_task, info_task, sales_task)
             return stats, info, sales
     
+    async def get_top_collection_offer(self, collection_slug: str) -> Dict[str, Any]:
+        """Get the highest *per-item* collection offer (top bid) for a collection.
+
+        OpenSea returns each offer's ``price.value`` as the TOTAL for the whole
+        order, which may cover more than one NFT (``remaining_quantity`` > 1).
+        The comparable "top offer" shown on OpenSea is per item, so we divide by
+        the quantity before picking the maximum.
+
+        Returns ``{"value": <eth per item>, "symbol": <currency>}`` on success,
+        or ``{"error": ...}`` on failure / when no active offer exists.
+        """
+        safe_slug = quote(collection_slug, safe="")
+        url = f"{self.base_url}/offers/collection/{safe_slug}"
+
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            data = await self._make_request(url, session)
+
+        if not data:
+            return {"error": "Gagal mengambil data offer"}
+        if "error" in data:
+            return data
+
+        offers = data.get("offers") or []
+        best_value = 0.0
+        best_symbol = "WETH"
+        for offer in offers:
+            price = offer.get("price") or {}
+            try:
+                raw = float(price.get("value", 0))
+                decimals = int(price.get("decimals", 18))
+            except (TypeError, ValueError):
+                continue
+            if raw <= 0:
+                continue
+
+            amount = raw / (10 ** decimals)
+            try:
+                quantity = int(offer.get("remaining_quantity") or 1)
+            except (TypeError, ValueError):
+                quantity = 1
+            per_item = amount / quantity if quantity > 0 else amount
+
+            if per_item > best_value:
+                best_value = per_item
+                best_symbol = price.get("currency") or "WETH"
+
+        if best_value <= 0:
+            return {"error": "Belum ada collection offer aktif"}
+        return {"value": best_value, "symbol": best_symbol}
+
     async def get_floor_price_fast(self, collection_slug: str) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         Get stats and info in parallel for faster response
