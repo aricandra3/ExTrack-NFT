@@ -377,11 +377,11 @@ def main_menu_keyboard():
 def price_menu_keyboard():
     """Sub-menu for price & tracking commands."""
     keyboard = [
-        [InlineKeyboardButton("🔍 Floor Price", callback_data="cmd_floor"),
-         InlineKeyboardButton("📊 Cek Semua", callback_data="cmd_check")],
+        [InlineKeyboardButton("🔍 Cek 1 Koleksi", callback_data="cmd_floor"),
+         InlineKeyboardButton("📊 Cek Harga (watchlist)", callback_data="cmd_check")],
         [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
          InlineKeyboardButton("🗑 Untrack", callback_data="cmd_untrack")],
-        [InlineKeyboardButton("📋 List Pantauan", callback_data="cmd_list"),
+        [InlineKeyboardButton("📋 Watchlist (nama)", callback_data="cmd_list"),
          InlineKeyboardButton("💎 Volume", callback_data="cmd_volume")],
         [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")],
     ]
@@ -509,8 +509,10 @@ MAIN_MENU_TEXT = (
 PRICE_MENU_TEXT = (
     "📊 *Price & Tracking*\n"
     "Floor, watchlist, dan market snapshot\n\n"
-    "🔎 Cepat: `.p slug`\n"
-    "📌 Alias: `.alias pendek slug-asli`"
+    "📋 *Watchlist* — daftar nama koleksi (instan)\n"
+    "📊 *Cek Harga* — floor live semua watchlist\n"
+    "📌 Track banyak: `/track azuki pudgypenguins`\n"
+    "🔎 Cepat 1 koleksi: `.p slug`"
 )
 
 ALERTS_MENU_TEXT = (
@@ -555,7 +557,7 @@ HELP_TEXT = (
     "📖 *Bantuan*\n"
     "Cara cepat pakai bot\n\n"
     "🔎 Floor: `.p slug`\n"
-    "📌 Track: `/track slug`\n"
+    "📌 Track (banyak): `/track slug1 slug2 ...`\n"
     "🔔 Alert: `/alert slug price`\n"
     "🏷 Offer alert: `/alert slug price above offer`\n"
     "📎 Alias: `.alias pendek slug-asli`\n\n"
@@ -566,8 +568,8 @@ HELP_TEXT = (
 # Prompts shown when asking for user input
 INPUT_PROMPTS = {
     "floor": "🔍 *Floor Price*\nKetik slug koleksi NFT.\n\nContoh: `boredapeyachtclub`",
-    "track": "📌 *Track Koleksi*\nKetik slug yang ingin dipantau.\n\nContoh: `azuki`",
-    "untrack": "🗑 *Untrack Koleksi*\nKetik slug yang ingin dihapus.\n\nContoh: `azuki`",
+    "track": "📌 *Track Koleksi*\nKetik satu atau beberapa slug (pisah spasi/koma).\n\nContoh: `azuki` atau `azuki pudgypenguins boredapeyachtclub`",
+    "untrack": "🗑 *Untrack Koleksi*\nKetik satu atau beberapa slug (pisah spasi/koma).\n\nContoh: `azuki` atau `azuki pudgypenguins`",
     "volume": "💎 *Volume*\nKetik slug koleksi NFT.\n\nContoh: `boredapeyachtclub`",
     "alert_below": "📉 *Floor Alert*\nFloor di bawah target.\n\nFormat: `slug harga [repeat]`\nContoh: `boredapeyachtclub 50`",
     "alert_above": "📈 *Floor Alert*\nFloor di atas target.\n\nFormat: `slug harga [repeat]`\nContoh: `azuki 20`",
@@ -577,7 +579,7 @@ INPUT_PROMPTS = {
     "palert": "📊 *Percentage Alert*\nKetik slug, persen, dan arah.\n\nFormat: `slug persen [up/down/both] [repeat]`\nContoh: `azuki 10 up`",
     "valert": "💎 *Volume Alert*\nKetik slug dan multiplier.\n\nFormat: `slug [multiplier]`\nContoh: `azuki 3`",
     "addnft": "➕ *Tambah NFT*\nKetik slug, jumlah, dan harga beli.\n\nFormat: `slug jumlah buy_price`\nContoh: `azuki 2 15.5`",
-    "removenft": "➖ *Hapus NFT*\nKetik slug yang ingin dihapus dari portfolio.\n\nContoh: `azuki`",
+    "removenft": "➖ *Hapus NFT*\nKetik satu atau beberapa slug (pisah spasi/koma).\n\nContoh: `azuki` atau `azuki pudgypenguins`",
     "gasalert": "⏰ *Gas Alert*\nKetik target gwei dan tipe.\n\nFormat: `gwei [below/above]`\nContoh: `25 below`",
     "addmint": "🗓 *Mint Reminder*\nKetik info mint NFT.\n\nFormat: `nama | harga | YYYY-MM-DD HH:MM | link`\nContoh: `Azuki Elementals | 0.5 ETH | 2026-03-01 14:00 | https://azuki.com/mint`",
     "removemint": "🗑 *Hapus Mint Reminder*\nKetik ID reminder yang ingin dihapus.\n\nCek ID: `/mints`",
@@ -615,6 +617,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = query.from_user.id
     chat_id = query.message.chat_id
 
+    # Keep the interactive menu at the bottom of the chat: delete the tapped
+    # message and resend a fresh one, so it drops below any messages that
+    # arrived in between. Falls back gracefully if the old message can't be
+    # deleted (e.g. too old).
+    current = query.message
+
+    async def show(text, reply_markup=None, disable_web_page_preview=False):
+        nonlocal current
+        try:
+            await current.delete()
+        except Exception:
+            pass
+        current = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=disable_web_page_preview,
+            disable_notification=True,
+        )
+        return current
+
+    def cancel_kb():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
+        ])
+
     # Menu navigation
     menu_map = {
         "menu_main": (MAIN_MENU_TEXT, main_menu_keyboard()),
@@ -631,11 +660,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Clear any pending action when navigating menus
         context.user_data.pop("pending_action", None)
         text, keyboard = menu_map[data]
-        await query.edit_message_text(
-            text=text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard
-        )
+        await show(text, keyboard)
         return
 
     # ---- 1-tap alert delete ----
@@ -655,7 +680,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if remove_func and aid is not None:
             remove_func(user_id, aid)
         text, keyboard = _alerts_overview_payload(user_id)
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await show(text, keyboard)
         return
 
     # ---- No-arg commands: execute directly ----
@@ -668,20 +693,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await show(text, keyboard)
         return
 
     if data == "cmd_check":
         collections = db.get_tracked_collections(user_id)
         if not collections:
-            text = _format_watchlist(collections)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price")]
             ])
-            await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            await show(_format_watchlist(collections), keyboard)
             return
-        await query.edit_message_text("🔍 Mengambil data harga...")
+        msg = await show("🔍 Mengambil data harga...")
         text = await _build_tracked_floors_text(collections)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
@@ -689,12 +713,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     if data == "cmd_alerts":
         text, keyboard = _alerts_overview_payload(user_id)
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await show(text, keyboard)
         return
 
     if data == "cmd_portfolio":
@@ -709,9 +733,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 [InlineKeyboardButton("➕ Tambah NFT", callback_data="cmd_addnft"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_portfolio")]
             ])
-            await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            await show(text, keyboard)
             return
-        await query.edit_message_text("💼 Menghitung portofolio Anda...")
+        msg = await show("💼 Menghitung portofolio Anda...")
         text = await _build_portfolio_text(portfolio)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_portfolio"),
@@ -719,11 +743,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_portfolio"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     if data == "cmd_gas":
-        await query.edit_message_text("⛽ Mengambil data gas...")
+        msg = await show("⛽ Mengambil data gas...")
         gas_data = await gas_api.get_gas_price()
         text = gas_api.format_gas_price(gas_data)
         keyboard = InlineKeyboardMarkup([
@@ -732,11 +756,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_gas"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     if data == "cmd_ethprice":
-        await query.edit_message_text("💱 Mengambil harga ETH...")
+        msg = await show("💱 Mengambil harga ETH...")
         eth_data = await price_api.get_eth_price()
         text = price_api.format_eth_price(eth_data)
         keyboard = InlineKeyboardMarkup([
@@ -745,27 +769,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_converter"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     if data == "cmd_mints":
         reminders = db.get_mint_reminders(user_id)
+        text = _format_mint_reminders(reminders)
         if not reminders:
-            text = _format_mint_reminders(reminders)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Tambah Reminder", callback_data="cmd_addmint"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts")]
             ])
         else:
-            text = _format_mint_reminders(reminders)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Tambah", callback_data="cmd_addmint"),
                  InlineKeyboardButton("🗑 Hapus", callback_data="cmd_removemint")],
                 [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_alerts"),
                  InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
             ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
-                                      disable_web_page_preview=True)
+        await show(text, keyboard, disable_web_page_preview=True)
         return
 
     # ---- Arg-required commands: prompt for input ----
@@ -773,14 +795,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         action = data[4:]  # e.g. "floor", "track", "alert"
         if action in INPUT_PROMPTS:
             context.user_data["pending_action"] = action
-            cancel_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
-            ])
-            await query.edit_message_text(
-                text=INPUT_PROMPTS[action],
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=cancel_kb
-            )
+            await show(INPUT_PROMPTS[action], cancel_kb())
             return
 
     # ---- Quick actions after floor check ----
@@ -789,17 +804,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["pending_action"] = "alert"
         context.user_data["pending_slug"] = slug
         context.user_data["pending_basis"] = "floor"
-        cancel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
-        ])
-        await query.edit_message_text(
-            text=(
-                f"💰 *Floor Alert untuk* `{slug}`\n\n"
-                "Ketik harga target (ETH):\n\n"
-                "_Contoh:_ `50` atau `50 above`"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=cancel_kb
+        await show(
+            f"💰 *Floor Alert untuk* `{slug}`\n\n"
+            "Ketik harga target (ETH):\n\n"
+            "_Contoh:_ `50` atau `50 above`",
+            cancel_kb()
         )
         return
 
@@ -808,17 +817,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["pending_action"] = "alert"
         context.user_data["pending_slug"] = slug
         context.user_data["pending_basis"] = "top_offer"
-        cancel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
-        ])
-        await query.edit_message_text(
-            text=(
-                f"🏷 *Top Offer Alert untuk* `{slug}`\n\n"
-                "Ketik harga target (WETH):\n\n"
-                "_Contoh:_ `8` atau `8 above`"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=cancel_kb
+        await show(
+            f"🏷 *Top Offer Alert untuk* `{slug}`\n\n"
+            "Ketik harga target (WETH):\n\n"
+            "_Contoh:_ `8` atau `8 above`",
+            cancel_kb()
         )
         return
 
@@ -826,24 +829,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         slug = data[10:]  # extract slug from "qa_valert_<slug>"
         context.user_data["pending_action"] = "valert"
         context.user_data["pending_slug"] = slug
-        cancel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Batal", callback_data="menu_main")]
-        ])
-        await query.edit_message_text(
-            text=(
-                f"📢 *Set Volume Alert untuk* `{slug}`\n\n"
-                "Ketik multiplier volume spike:\n\n"
-                "_Contoh:_ `2` atau `3`"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=cancel_kb
+        await show(
+            f"📢 *Set Volume Alert untuk* `{slug}`\n\n"
+            "Ketik multiplier volume spike:\n\n"
+            "_Contoh:_ `2` atau `3`",
+            cancel_kb()
         )
         return
 
     if data.startswith("qa_track_"):
         slug = data[9:]  # extract slug from "qa_track_<slug>"
-        success = db.add_tracked_collection(user_id, slug)
-        if success:
+        if db.add_tracked_collection(user_id, slug):
             text = f"✅ `{slug}` berhasil ditambahkan ke watchlist!"
         else:
             text = f"ℹ️ `{slug}` sudah ada di watchlist Anda."
@@ -851,7 +847,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("📋 Lihat Watchlist", callback_data="cmd_list"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
-        await query.edit_message_text(text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await show(text, keyboard)
         return
 
 
@@ -908,32 +904,29 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if action == "track":
-        slug = text.split()[0].lower()
-        stats = await opensea_api.get_collection_stats(slug)
-        if stats and "error" in stats:
-            await update.message.reply_text(f"❌ {stats['error']}")
+        slugs = _parse_slugs(text)
+        if not slugs:
+            await update.message.reply_text("❌ Ketik minimal satu slug.")
             return
-        success = db.add_tracked_collection(user_id, slug)
-        if success:
-            msg = f"✅ `{slug}` berhasil ditambahkan ke watchlist!"
-        else:
-            msg = f"ℹ️ `{slug}` sudah ada di watchlist Anda."
+        if len(slugs) > 1:
+            await update.message.reply_text(f"🔍 Memverifikasi {len(slugs)} koleksi...")
+        msg = await _batch_track(user_id, slugs)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Lihat Watchlist", callback_data="cmd_list"),
-             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+             InlineKeyboardButton("📊 Cek Harga", callback_data="cmd_check")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     if action == "untrack":
-        slug = text.split()[0].lower()
-        success = db.remove_tracked_collection(user_id, slug)
-        if success:
-            msg = f"✅ `{slug}` berhasil dihapus dari watchlist."
-        else:
-            msg = f"❌ `{slug}` tidak ditemukan di watchlist Anda."
+        slugs = _parse_slugs(text)
+        if not slugs:
+            await update.message.reply_text("❌ Ketik minimal satu slug.")
+            return
+        msg = _batch_untrack(user_id, slugs)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Lihat Watchlist", callback_data="cmd_list"),
+            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -961,14 +954,13 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if action == "removenft":
-        slug = text.split()[0].lower()
-        success = db.remove_portfolio_item(user_id, slug)
-        if success:
-            msg = f"✅ `{slug}` berhasil dihapus dari portofolio."
-        else:
-            msg = f"❌ `{slug}` tidak ditemukan di portofolio Anda."
+        slugs = _parse_slugs(text)
+        if not slugs:
+            await update.message.reply_text("❌ Ketik minimal satu slug.")
+            return
+        msg = _batch_remove_portfolio(user_id, slugs)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💰 Lihat Portofolio", callback_data="cmd_portfolio"),
+            [InlineKeyboardButton("💼 Lihat Portofolio", callback_data="cmd_portfolio"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -1377,8 +1369,8 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "🏠 Menu utama"),
         BotCommand("help", "📖 Bantuan"),
         BotCommand("floor", "🔍 Cek floor price"),
-        BotCommand("track", "📌 Pantau koleksi"),
-        BotCommand("untrack", "🗑 Hapus pantauan"),
+        BotCommand("track", "📌 Pantau koleksi (bisa banyak)"),
+        BotCommand("untrack", "🗑 Hapus pantauan (bisa banyak)"),
         BotCommand("list", "📋 Daftar pantauan"),
         BotCommand("check", "📊 Cek semua harga"),
         BotCommand("alert", "⚡ Set price alert"),
@@ -1485,6 +1477,70 @@ async def _build_portfolio_text(portfolio: list) -> str:
     return "\n".join(lines).strip()
 
 
+def _parse_slugs(text: str, limit: int = 20) -> list[str]:
+    """Split user text into unique lowercase slugs (space / comma / newline separated)."""
+    parts = re.split(r"[\s,]+", text.strip())
+    slugs = []
+    for p in parts:
+        p = p.strip().lower()
+        if p and p not in slugs:
+            slugs.append(p)
+        if len(slugs) >= limit:
+            break
+    return slugs
+
+
+def _format_batch_summary(title: str, groups: list) -> str:
+    """Format a multi-slug action result. groups: list of (label, [slugs])."""
+    lines = [title, ""]
+    for label, items in groups:
+        if items:
+            joined = ", ".join(f"`{_escape_md_text(_compact_slug(s, 22))}`" for s in items)
+            lines.append(f"{label} *{len(items)}*: {joined}")
+    return "\n".join(lines).strip()
+
+
+async def _batch_track(user_id: int, slugs: list[str]) -> str:
+    """Verify (in parallel) and track many collections at once."""
+    stats_map = await _fetch_stats_map(slugs)
+    added, exists, failed = [], [], []
+    for slug in slugs:
+        stats = stats_map.get(slug)
+        if not stats or "error" in stats:
+            failed.append(slug)
+        elif db.add_tracked_collection(user_id, slug):
+            added.append(slug)
+        else:
+            exists.append(slug)
+    return _format_batch_summary("📌 *Track*", [
+        ("✅ Ditambahkan", added),
+        ("ℹ️ Sudah ada", exists),
+        ("❌ Tidak ditemukan", failed),
+    ])
+
+
+def _batch_untrack(user_id: int, slugs: list[str]) -> str:
+    """Untrack many collections at once (no API calls needed)."""
+    removed, notfound = [], []
+    for slug in slugs:
+        (removed if db.remove_tracked_collection(user_id, slug) else notfound).append(slug)
+    return _format_batch_summary("🗑 *Untrack*", [
+        ("✅ Dihapus", removed),
+        ("❌ Tidak ada di watchlist", notfound),
+    ])
+
+
+def _batch_remove_portfolio(user_id: int, slugs: list[str]) -> str:
+    """Remove many portfolio holdings at once."""
+    removed, notfound = [], []
+    for slug in slugs:
+        (removed if db.remove_portfolio_item(user_id, slug) else notfound).append(slug)
+    return _format_batch_summary("➖ *Hapus NFT*", [
+        ("✅ Dihapus", removed),
+        ("❌ Tidak ada di portfolio", notfound),
+    ])
+
+
 async def send_floor_overview(message, collection_slug: str) -> None:
     """Send the rich floor/market overview for a collection slug."""
     slug = collection_slug.lower().strip()
@@ -1538,63 +1594,47 @@ async def floor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add collection to tracked list."""
-    if not context.args:
+    """Add one or more collections to the watchlist."""
+    slugs = _parse_slugs(" ".join(context.args))
+    if not slugs:
         await update.message.reply_text(
-            "❌ Mohon masukkan collection slug.\n"
-            "Contoh: `/track boredapeyachtclub`",
+            "❌ Masukkan minimal satu slug (boleh banyak sekaligus).\n"
+            "Contoh: `/track azuki` atau `/track azuki pudgypenguins boredapeyachtclub`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
+    if len(slugs) > 1:
+        await update.message.reply_text(f"🔍 Memverifikasi {len(slugs)} koleksi...")
 
-    # Verify collection exists
-    stats = await opensea_api.get_collection_stats(collection_slug)
-    if stats and "error" in stats:
-        await update.message.reply_text(f"❌ {stats['error']}")
-        return
-
-    success = db.add_tracked_collection(user_id, collection_slug)
-
-    if success:
-        await update.message.reply_text(
-            f"✅ Berhasil menambahkan `{collection_slug}` ke daftar pantauan!",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await update.message.reply_text(
-            f"ℹ️ `{collection_slug}` sudah ada di daftar pantauan.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    text = await _batch_track(user_id, slugs)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+         InlineKeyboardButton("📊 Cek Harga", callback_data="cmd_check")],
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove collection from tracked list."""
-    if not context.args:
+    """Remove one or more collections from the watchlist."""
+    slugs = _parse_slugs(" ".join(context.args))
+    if not slugs:
         await update.message.reply_text(
-            "❌ Mohon masukkan collection slug.\n"
-            "Contoh: `/untrack boredapeyachtclub`",
+            "❌ Masukkan minimal satu slug (boleh banyak sekaligus).\n"
+            "Contoh: `/untrack azuki` atau `/untrack azuki pudgypenguins`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
-
-    success = db.remove_tracked_collection(user_id, collection_slug)
-
-    if success:
-        await update.message.reply_text(
-            f"✅ Berhasil menghapus `{collection_slug}` dari daftar pantauan.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ `{collection_slug}` tidak ditemukan di daftar pantauan.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    text = _batch_untrack(user_id, slugs)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+         InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1920,30 +1960,23 @@ async def addnft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def removenft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove NFT from portfolio."""
-    if not context.args:
+    """Remove one or more holdings from the portfolio."""
+    slugs = _parse_slugs(" ".join(context.args))
+    if not slugs:
         await update.message.reply_text(
-            "❌ Format: `/removenft <slug>`\n"
-            "Contoh: `/removenft azuki`",
+            "❌ Format: `/removenft <slug> [slug2 ...]`\n"
+            "Contoh: `/removenft azuki` atau `/removenft azuki pudgypenguins`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
-    collection_slug = context.args[0].lower()
     user_id = update.effective_user.id
-
-    success = db.remove_portfolio_item(user_id, collection_slug)
-
-    if success:
-        await update.message.reply_text(
-            f"✅ `{collection_slug}` berhasil dihapus dari portofolio.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ `{collection_slug}` tidak ditemukan di portofolio Anda.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    text = _batch_remove_portfolio(user_id, slugs)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💼 Portofolio", callback_data="cmd_portfolio"),
+         InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
