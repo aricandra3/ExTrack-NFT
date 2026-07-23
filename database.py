@@ -126,18 +126,22 @@ class Database:
                 collection_slug TEXT NOT NULL,
                 target_price REAL NOT NULL,
                 alert_type TEXT DEFAULT 'below',
+                price_basis TEXT DEFAULT 'floor',
                 is_active INTEGER DEFAULT 1,
                 is_recurring INTEGER DEFAULT 0,
                 current_price_at_set REAL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 triggered_at TIMESTAMP,
-                UNIQUE(user_id, collection_slug, target_price, alert_type)
+                UNIQUE(user_id, collection_slug, target_price, alert_type, price_basis)
             )
         """)
 
         # Migrate: add columns if missing
         self._add_column_if_missing(cursor, "price_alerts", "is_recurring INTEGER DEFAULT 0")
         self._add_column_if_missing(cursor, "price_alerts", "current_price_at_set REAL DEFAULT 0")
+        # price_basis: 'floor' (default) or 'top_offer'. Chooses which market price
+        # the alert compares against.
+        self._add_column_if_missing(cursor, "price_alerts", "price_basis TEXT DEFAULT 'floor'")
 
         # Table for price history (for percentage calculations)
         cursor.execute("""
@@ -327,18 +331,23 @@ class Database:
     # Price Alerts Methods
     def add_price_alert(self, user_id: int, collection_slug: str, target_price: float,
                         alert_type: str = "below", is_recurring: bool = False,
-                        current_price: float = 0) -> bool:
-        """Add a price alert for a collection"""
+                        current_price: float = 0, price_basis: str = "floor") -> bool:
+        """Add a price alert for a collection.
+
+        ``price_basis`` selects which market price the alert tracks:
+        'floor' (default) or 'top_offer' (highest collection bid).
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
             cursor.execute(
                 """INSERT INTO price_alerts
-                   (user_id, collection_slug, target_price, alert_type, is_recurring, current_price_at_set)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (user_id, collection_slug, target_price, alert_type, price_basis,
+                    is_recurring, current_price_at_set)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (user_id, collection_slug.lower(), target_price, alert_type,
-                 1 if is_recurring else 0, current_price)
+                 price_basis, 1 if is_recurring else 0, current_price)
             )
             conn.commit()
             return True
@@ -422,7 +431,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute(
-            """SELECT id, collection_slug, target_price, alert_type, is_recurring
+            """SELECT id, collection_slug, target_price, alert_type, is_recurring, price_basis
                FROM price_alerts WHERE user_id = ? AND is_active = 1""",
             (user_id,)
         )
@@ -438,7 +447,7 @@ class Database:
 
         cursor.execute(
             """SELECT user_id, collection_slug, target_price, alert_type,
-                      is_recurring, current_price_at_set, triggered_at
+                      is_recurring, current_price_at_set, triggered_at, price_basis
                FROM price_alerts WHERE is_active = 1"""
         )
         alerts = cursor.fetchall()
@@ -447,7 +456,8 @@ class Database:
         return alerts
 
     def deactivate_alert(self, user_id: int, collection_slug: str, target_price: float,
-                         alert_type: str, current_price: Optional[float] = None):
+                         alert_type: str, current_price: Optional[float] = None,
+                         price_basis: str = "floor"):
         """Mark an alert as triggered/inactive. If recurring, reset reference price instead."""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -456,8 +466,8 @@ class Database:
         cursor.execute(
             """SELECT is_recurring FROM price_alerts
                WHERE user_id = ? AND collection_slug = ? AND target_price = ?
-               AND alert_type = ? AND is_active = 1""",
-            (user_id, collection_slug.lower(), target_price, alert_type)
+               AND alert_type = ? AND price_basis = ? AND is_active = 1""",
+            (user_id, collection_slug.lower(), target_price, alert_type, price_basis)
         )
         row = cursor.fetchone()
         price_update = current_price if current_price is not None else 0
@@ -466,30 +476,32 @@ class Database:
             cursor.execute(
                 """UPDATE price_alerts
                    SET triggered_at = CURRENT_TIMESTAMP, current_price_at_set = ?
-                   WHERE user_id = ? AND collection_slug = ? AND target_price = ? AND alert_type = ?""",
-                (price_update, user_id, collection_slug.lower(), target_price, alert_type)
+                   WHERE user_id = ? AND collection_slug = ? AND target_price = ?
+                   AND alert_type = ? AND price_basis = ?""",
+                (price_update, user_id, collection_slug.lower(), target_price, alert_type, price_basis)
             )
         else:
             cursor.execute(
                 """UPDATE price_alerts
                    SET is_active = 0, triggered_at = CURRENT_TIMESTAMP, current_price_at_set = ?
-                   WHERE user_id = ? AND collection_slug = ? AND target_price = ? AND alert_type = ?""",
-                (price_update, user_id, collection_slug.lower(), target_price, alert_type)
+                   WHERE user_id = ? AND collection_slug = ? AND target_price = ?
+                   AND alert_type = ? AND price_basis = ?""",
+                (price_update, user_id, collection_slug.lower(), target_price, alert_type, price_basis)
             )
         conn.commit()
         conn.close()
 
     def update_price_alert_observed_price(self, user_id: int, collection_slug: str,
                                           target_price: float, alert_type: str,
-                                          current_price: float):
-        """Store the latest checked floor price so recurring alerts trigger on crossing."""
+                                          current_price: float, price_basis: str = "floor"):
+        """Store the latest checked price so recurring alerts trigger on crossing."""
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """UPDATE price_alerts SET current_price_at_set = ?
                WHERE user_id = ? AND collection_slug = ? AND target_price = ?
-               AND alert_type = ? AND is_active = 1""",
-            (current_price, user_id, collection_slug.lower(), target_price, alert_type)
+               AND alert_type = ? AND price_basis = ? AND is_active = 1""",
+            (current_price, user_id, collection_slug.lower(), target_price, alert_type, price_basis)
         )
         conn.commit()
         conn.close()
