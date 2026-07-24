@@ -83,13 +83,42 @@ class OpenSeaAPI:
             stats, info, sales = await asyncio.gather(stats_task, info_task, sales_task)
             return stats, info, sales
     
+    @staticmethod
+    def _offer_item_quantity(offer: Dict[str, Any], fallback: int = 1) -> int:
+        """How many NFTs the offer is priced for, from the Seaport consideration.
+
+        ``price.value`` is the TOTAL for the whole order, so the per-item price is
+        ``value / quantity``. The quantity must be the *originally priced* count
+        (consideration), not ``remaining_quantity`` — a partially filled order keeps
+        its original ``price.value`` but a smaller ``remaining_quantity``, which would
+        otherwise inflate the per-item price.
+        """
+        params = (offer.get("protocol_data") or {}).get("parameters") or {}
+        for item in params.get("consideration") or []:
+            try:
+                item_type = int(item.get("itemType", 0))
+            except (TypeError, ValueError):
+                continue
+            # 2=ERC721, 3=ERC1155, 4=ERC721_WITH_CRITERIA, 5=ERC1155_WITH_CRITERIA
+            if item_type in (2, 3, 4, 5):
+                try:
+                    qty = int(item.get("startAmount") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty > 0:
+                    return qty
+        return fallback if fallback > 0 else 1
+
     async def get_top_collection_offer(self, collection_slug: str) -> Dict[str, Any]:
         """Get the highest *per-item* collection offer (top bid) for a collection.
 
-        OpenSea returns each offer's ``price.value`` as the TOTAL for the whole
-        order, which may cover more than one NFT (``remaining_quantity`` > 1).
-        The comparable "top offer" shown on OpenSea is per item, so we divide by
-        the quantity before picking the maximum.
+        Mirrors what OpenSea shows as the collection "top offer": the highest
+        collection-wide bid, per item. We therefore:
+
+        - skip trait-restricted offers (not collection-wide);
+        - skip exhausted/inactive offers (``remaining_quantity`` < 1);
+        - compute per-item as ``price.value`` (the order total) divided by the
+          originally priced NFT quantity from the Seaport consideration.
 
         Returns ``{"value": <eth per item>, "symbol": <currency>}`` on success,
         or ``{"error": ...}`` on failure / when no active offer exists.
@@ -109,6 +138,19 @@ class OpenSeaAPI:
         best_value = 0.0
         best_symbol = "WETH"
         for offer in offers:
+            # Only collection-wide offers count toward the "top offer".
+            criteria = offer.get("criteria") or {}
+            if criteria.get("trait") or criteria.get("traits"):
+                continue
+
+            # Skip exhausted / inactive offers (nothing left to fill).
+            try:
+                remaining = int(offer.get("remaining_quantity") or 0)
+            except (TypeError, ValueError):
+                remaining = 0
+            if remaining < 1:
+                continue
+
             price = offer.get("price") or {}
             try:
                 raw = float(price.get("value", 0))
@@ -118,11 +160,8 @@ class OpenSeaAPI:
             if raw <= 0:
                 continue
 
-            amount = raw / (10 ** decimals)
-            try:
-                quantity = int(offer.get("remaining_quantity") or 1)
-            except (TypeError, ValueError):
-                quantity = 1
+            amount = raw / (10 ** decimals)  # order total in ETH
+            quantity = self._offer_item_quantity(offer, fallback=remaining)
             per_item = amount / quantity if quantity > 0 else amount
 
             if per_item > best_value:
