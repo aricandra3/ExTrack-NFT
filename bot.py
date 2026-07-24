@@ -2296,32 +2296,64 @@ async def gasalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+async def _fetch_alert_price(slug: str, basis: str):
+    """Fetch (price, symbol) for one (slug, basis). Returns None on error/missing."""
+    try:
+        if basis == "top_offer":
+            offer = await opensea_api.get_top_collection_offer(slug)
+            if not offer or "error" in offer:
+                return None
+            return offer.get("value"), offer.get("symbol", "WETH")
+        stats = await opensea_api.get_collection_stats(slug)
+        if not stats or "error" in stats:
+            return None
+        total = stats.get("total", {})
+        floor = total.get("floor_price")
+        if floor is None:
+            return None
+        return floor, total.get("floor_price_symbol", "ETH")
+    except Exception as e:
+        logger.error(f"Alert price fetch failed for {slug}/{basis}: {e}")
+        return None
+
+
+async def _fetch_alert_prices(keys, concurrency: int = 10) -> dict:
+    """Fetch prices for many (slug, basis) keys concurrently (deduped, capped).
+
+    Returns {(slug, basis): (price, symbol) | None}. This is what keeps the
+    background alert cycle fast — one fetch per unique collection, in parallel,
+    instead of one sequential request per alert.
+    """
+    unique = list(dict.fromkeys(keys))
+    if not unique:
+        return {}
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(slug, basis):
+        async with sem:
+            return await _fetch_alert_price(slug, basis)
+
+    results = await asyncio.gather(*(one(slug, basis) for slug, basis in unique))
+    return dict(zip(unique, results))
+
+
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check price alerts."""
     alerts = db.get_all_active_alerts()
+    if not alerts:
+        return
+
+    # Fetch every distinct (collection, basis) once, in parallel.
+    price_map = await _fetch_alert_prices((a[1], a[7]) for a in alerts)
 
     for (user_id, collection_slug, target_price, alert_type, is_recurring,
          last_price, triggered_at, price_basis) in alerts:
         try:
-            # Fetch the price for this alert's basis (floor price or top offer).
-            if price_basis == "top_offer":
-                offer = await opensea_api.get_top_collection_offer(collection_slug)
-                if not offer or "error" in offer:
-                    continue
-                current_price = offer.get("value")
-                symbol = offer.get("symbol", "WETH")
-                basis_label = "Top Offer"
-            else:
-                stats = await opensea_api.get_collection_stats(collection_slug)
-                if not stats or "error" in stats:
-                    continue
-                total = stats.get("total", {})
-                current_price = total.get("floor_price")
-                symbol = total.get("floor_price_symbol", "ETH")
-                basis_label = "Floor Price"
-
-            if current_price is None:
+            data = price_map.get((collection_slug, price_basis))
+            if not data:
                 continue
+            current_price, symbol = data
+            basis_label = "Top Offer" if price_basis == "top_offer" else "Floor Price"
 
             condition_met = _price_alert_condition_met(alert_type, current_price, target_price)
             crossed = _price_alert_crossed(alert_type, last_price, target_price)
@@ -2364,62 +2396,63 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_percentage_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job to check percentage-based alerts."""
     alerts = db.get_all_percentage_alerts()
+    if not alerts:
+        return
+
+    # Percentage alerts all track floor; fetch each collection's floor once.
+    price_map = await _fetch_alert_prices((a[1], "floor") for a in alerts)
 
     for user_id, collection_slug, percentage, direction, reference_price, _is_recurring in alerts:
         try:
-            # Get current price
-            stats = await opensea_api.get_collection_stats(collection_slug)
-            if stats and "error" not in stats:
-                total = stats.get("total", {})
-                current_price = total.get("floor_price")
-                if current_price is None:
-                    continue
-                symbol = total.get("floor_price_symbol", "ETH")
+            data = price_map.get((collection_slug, "floor"))
+            if not data:
+                continue
+            current_price, symbol = data
 
-                ref_price = reference_price or db.get_oldest_price(collection_slug)
-                if not ref_price or ref_price <= 0:
-                    db.update_percentage_alert_ref_price(
-                        user_id, collection_slug, percentage, direction, current_price
+            ref_price = reference_price or db.get_oldest_price(collection_slug)
+            if not ref_price or ref_price <= 0:
+                db.update_percentage_alert_ref_price(
+                    user_id, collection_slug, percentage, direction, current_price
+                )
+                continue
+
+            change_pct = ((current_price - ref_price) / ref_price) * 100
+
+            should_trigger = False
+            if direction == "up" and change_pct >= percentage:
+                should_trigger = True
+            elif direction == "down" and change_pct <= -percentage:
+                should_trigger = True
+            elif direction == "both" and abs(change_pct) >= percentage:
+                should_trigger = True
+
+            if should_trigger:
+                sign = "+" if change_pct > 0 else ""
+                trend = "📈 NAIK" if change_pct > 0 else "📉 TURUN"
+
+                message = (
+                    f"🚨 *Percentage Alert!*\n\n"
+                    f"Koleksi: `{collection_slug}`\n"
+                    f"Perubahan: {trend} *{sign}{change_pct:.1f}%*\n"
+                    f"Harga referensi: {ref_price:.4f} {symbol}\n"
+                    f"Harga sekarang: *{current_price:.4f} {symbol}*"
+                )
+
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN
                     )
-                    continue
-
-                change_pct = ((current_price - ref_price) / ref_price) * 100
-
-                should_trigger = False
-                if direction == "up" and change_pct >= percentage:
-                    should_trigger = True
-                elif direction == "down" and change_pct <= -percentage:
-                    should_trigger = True
-                elif direction == "both" and abs(change_pct) >= percentage:
-                    should_trigger = True
-
-                if should_trigger:
-                    sign = "+" if change_pct > 0 else ""
-                    trend = "📈 NAIK" if change_pct > 0 else "📉 TURUN"
-
-                    message = (
-                        f"🚨 *Percentage Alert!*\n\n"
-                        f"Koleksi: `{collection_slug}`\n"
-                        f"Perubahan: {trend} *{sign}{change_pct:.1f}%*\n"
-                        f"Harga referensi: {ref_price:.4f} {symbol}\n"
-                        f"Harga sekarang: *{current_price:.4f} {symbol}*"
+                    db.deactivate_percentage_alert(
+                        user_id,
+                        collection_slug,
+                        percentage,
+                        direction,
+                        new_ref_price=current_price,
                     )
-
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=message,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                        db.deactivate_percentage_alert(
-                            user_id,
-                            collection_slug,
-                            percentage,
-                            direction,
-                            new_ref_price=current_price,
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to send percentage alert to user {user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to send percentage alert to user {user_id}: {e}")
 
         except Exception as e:
             logger.error(f"Error checking percentage alert for {collection_slug}: {e}")

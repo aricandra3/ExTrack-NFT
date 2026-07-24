@@ -13,7 +13,7 @@ OPENSEA_API_KEY = os.getenv("OPENSEA_API_KEY", "")
 OPENSEA_API_BASE_URL = "https://api.opensea.io/api/v2"
 
 # Check interval for price alerts (in seconds)
-ALERT_CHECK_INTERVAL = 300  # 5 minutes
+ALERT_CHECK_INTERVAL = 120  # 2 minutes
 
 # Price history recording interval (in seconds)
 PRICE_HISTORY_INTERVAL = 3600  # 1 hour
