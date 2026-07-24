@@ -339,21 +339,45 @@ class Database:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
+        slug = collection_slug.lower()
 
         try:
+            # Re-arm a previously triggered (inactive) alert with the same key
+            # instead of rejecting it — a non-recurring alert that already fired
+            # is deactivated, not deleted, so its UNIQUE slot is still taken.
+            cursor.execute(
+                """SELECT id, is_active FROM price_alerts
+                   WHERE user_id = ? AND collection_slug = ? AND target_price = ?
+                   AND alert_type = ? AND price_basis = ?""",
+                (user_id, slug, target_price, alert_type, price_basis)
+            )
+            row = cursor.fetchone()
+            if row:
+                if row[1] == 1:
+                    return False  # genuinely active duplicate
+                cursor.execute(
+                    """UPDATE price_alerts
+                       SET is_active = 1, is_recurring = ?, current_price_at_set = ?,
+                           triggered_at = NULL
+                       WHERE id = ?""",
+                    (1 if is_recurring else 0, current_price, row[0])
+                )
+                conn.commit()
+                return True
+
             cursor.execute(
                 """INSERT INTO price_alerts
                    (user_id, collection_slug, target_price, alert_type, price_basis,
                     is_recurring, current_price_at_set)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (user_id, collection_slug.lower(), target_price, alert_type,
+                (user_id, slug, target_price, alert_type,
                  price_basis, 1 if is_recurring else 0, current_price)
             )
             conn.commit()
             return True
         except Exception as exc:
             if self._is_integrity_error(exc):
-                return False  # Alert already exists
+                return False  # legacy DB: UNIQUE without price_basis blocks a different basis
             raise
         finally:
             conn.close()
@@ -563,13 +587,35 @@ class Database:
         """Add a percentage-based alert with reference price"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        slug = collection_slug.lower()
 
         try:
+            # Re-arm a previously triggered (inactive) alert with the same key.
+            cursor.execute(
+                """SELECT id, is_active FROM percentage_alerts
+                   WHERE user_id = ? AND collection_slug = ? AND percentage_threshold = ?
+                   AND direction = ?""",
+                (user_id, slug, percentage, direction)
+            )
+            row = cursor.fetchone()
+            if row:
+                if row[1] == 1:
+                    return False
+                cursor.execute(
+                    """UPDATE percentage_alerts
+                       SET is_active = 1, is_recurring = ?, reference_price = ?,
+                           triggered_at = NULL
+                       WHERE id = ?""",
+                    (1 if is_recurring else 0, reference_price, row[0])
+                )
+                conn.commit()
+                return True
+
             cursor.execute(
                 """INSERT INTO percentage_alerts
                    (user_id, collection_slug, percentage_threshold, direction, is_recurring, reference_price)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, collection_slug.lower(), percentage, direction,
+                (user_id, slug, percentage, direction,
                  1 if is_recurring else 0, reference_price)
             )
             conn.commit()
@@ -790,6 +836,25 @@ class Database:
         cursor = conn.cursor()
 
         try:
+            # Re-arm a previously triggered (inactive) alert with the same key.
+            cursor.execute(
+                """SELECT id, is_active FROM gas_alerts
+                   WHERE user_id = ? AND target_gwei = ? AND alert_type = ?""",
+                (user_id, target_gwei, alert_type)
+            )
+            row = cursor.fetchone()
+            if row:
+                if row[1] == 1:
+                    return False
+                cursor.execute(
+                    """UPDATE gas_alerts
+                       SET is_active = 1, triggered_at = NULL
+                       WHERE id = ?""",
+                    (row[0],)
+                )
+                conn.commit()
+                return True
+
             cursor.execute(
                 """INSERT INTO gas_alerts (user_id, target_gwei, alert_type)
                    VALUES (?, ?, ?)""",
