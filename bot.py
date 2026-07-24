@@ -144,7 +144,12 @@ def _escape_md_text(value: str) -> str:
 def _compact_slug(slug: str, max_len: int = 34) -> str:
     if len(slug) <= max_len:
         return slug
-    return f"{slug[:max_len - 3]}..."
+    return f"{slug[:max_len - 1]}…"
+
+
+def _slug_code(slug: str, max_len: int = 26) -> str:
+    """Slug as a Markdown code span: monospace, no auto-linking of digits."""
+    return "`" + _compact_slug(slug, max_len).replace("`", "'") + "`"
 
 
 def _format_watchlist(collections: list[str]) -> str:
@@ -181,19 +186,19 @@ def _format_tracked_price_results(results: list[tuple[str, str, float | None, st
         "",
     ]
     for index, (slug, status, price, symbol, error) in enumerate(results, 1):
-        display_slug = _escape_md_text(_compact_slug(slug))
+        display_slug = _slug_code(slug)
         if status == "ok" and price is not None:
             idr_text = f" • Rp {price * idr_rate:,.0f}" if idr_rate else ""
-            lines.append(f"{index}. *{display_slug}*")
-            lines.append(f"   {label}: *{price:.4f} {symbol}*{idr_text}")
+            lines.append(f"*{index}.* {display_slug}")
+            lines.append(f"    {label}: *{price:.4f} {symbol}*{idr_text}")
         else:
             safe_error = _escape_md_text(error or "Gagal mengambil data")
-            lines.append(f"{index}. *{display_slug}*")
-            lines.append(f"   Status: ❌ {safe_error}")
+            lines.append(f"*{index}.* {display_slug}")
+            lines.append(f"    ❌ {safe_error}")
     lines.append("")
     if idr_rate:
         lines.append(f"💱 _1 ETH = Rp {idr_rate:,.0f}_")
-    lines.append("🔎 Detail koleksi: `.p slug`")
+    lines.append("👇 _Tap nomor koleksi untuk aksi._")
     return "\n".join(lines).strip()
 
 
@@ -466,6 +471,42 @@ def _alerts_overview_payload(user_id: int):
     return text, keyboard
 
 
+MAX_WATCHLIST_BUTTONS = 40
+
+
+def _watchlist_number_rows(count: int, per_row: int = 5):
+    """Rows of numbered buttons (1..count) that open each collection's action menu."""
+    rows, row = [], []
+    for i in range(min(count, MAX_WATCHLIST_BUTTONS)):
+        row.append(InlineKeyboardButton(str(i + 1), callback_data=f"wlmenu_{i}"))
+        if len(row) == per_row:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
+
+
+def _check_keyboard(collections, mode: str = "floor"):
+    """Numbered per-collection buttons + refresh / floor↔offer toggle / nav."""
+    rows = _watchlist_number_rows(len(collections))
+    if mode == "offer":
+        rows.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
+            InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
+            InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer"),
+        ])
+    rows.append([
+        InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+        InlineKeyboardButton("🏠 Menu", callback_data="menu_main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 def portfolio_menu_keyboard():
     """Sub-menu for portfolio commands."""
     keyboard = [
@@ -711,13 +752,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         msg = await show("🔍 Mengambil floor price...")
         text = await _build_tracked_floors_text(collections)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
-             InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
-            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
-             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
-        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=_check_keyboard(collections, "floor"))
         return
 
     if data == "cmd_check_offer":
@@ -731,14 +767,77 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         msg = await show("🏷 Mengambil top offer...")
         text = await _build_tracked_offers_text(collections)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
-             InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check")],
-            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
-             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
-        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=_check_keyboard(collections, "offer"))
         return
+
+    # ---- Per-collection actions from the numbered watchlist buttons ----
+    if data.startswith(("wlmenu_", "wldetail_", "wlfloor_", "wloffer_", "wluntrack_")):
+        try:
+            action, idx_str = data.rsplit("_", 1)
+            idx = int(idx_str)
+        except (ValueError, IndexError):
+            action, idx = None, -1
+        collections = db.get_tracked_collections(user_id)
+        if not (0 <= idx < len(collections)):
+            await show(
+                "⚠️ Koleksi tidak ditemukan (daftar mungkin berubah).",
+                InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
+                    InlineKeyboardButton("🏠 Menu", callback_data="menu_main"),
+                ]])
+            )
+            return
+        slug = collections[idx]
+
+        if action == "wlmenu":
+            await show(
+                f"📦 *{_slug_code(slug, 40)}*\n\nPilih aksi:",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Detail", callback_data=f"wldetail_{idx}")],
+                    [InlineKeyboardButton("💰 Floor Alert", callback_data=f"wlfloor_{idx}"),
+                     InlineKeyboardButton("🏷 Offer Alert", callback_data=f"wloffer_{idx}")],
+                    [InlineKeyboardButton("🗑 Untrack", callback_data=f"wluntrack_{idx}")],
+                    [InlineKeyboardButton("⬅️ Ke Daftar", callback_data="cmd_check"),
+                     InlineKeyboardButton("🏠 Menu", callback_data="menu_main")],
+                ])
+            )
+            return
+
+        if action == "wldetail":
+            msg = await show(f"🔍 Mencari data untuk `{slug}`...")
+            text, kb = await _build_floor_overview(slug)
+            await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
+                                disable_web_page_preview=True)
+            return
+
+        if action in ("wlfloor", "wloffer"):
+            basis = "top_offer" if action == "wloffer" else "floor"
+            context.user_data["pending_action"] = "alert"
+            context.user_data["pending_slug"] = slug
+            context.user_data["pending_basis"] = basis
+            emoji, label, unit = (
+                ("🏷", "Top Offer", "WETH") if basis == "top_offer" else ("💰", "Floor", "ETH")
+            )
+            await show(
+                f"{emoji} *{label} Alert untuk* `{slug}`\n\n"
+                f"Ketik harga target ({unit}):\n\n"
+                "_Contoh:_ `50` atau `50 above`",
+                cancel_kb()
+            )
+            return
+
+        if action == "wluntrack":
+            db.remove_tracked_collection(user_id, slug)
+            await show(
+                f"🗑 `{slug}` dihapus dari watchlist.",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
+                     InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list")],
+                    [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")],
+                ])
+            )
+            return
 
     if data == "cmd_alerts":
         text, keyboard = _alerts_overview_payload(user_id)
@@ -1602,22 +1701,19 @@ def _batch_remove_portfolio(user_id: int, slugs: list[str]) -> str:
     ])
 
 
-async def send_floor_overview(message, collection_slug: str) -> None:
-    """Send the rich floor/market overview for a collection slug."""
-    slug = collection_slug.lower().strip()
-    await message.reply_text(f"🔍 Mencari data untuk `{slug}`...", parse_mode=ParseMode.MARKDOWN)
+async def _build_floor_overview(slug: str):
+    """Fetch and format the rich floor/market overview. Returns (text, keyboard).
 
+    On failure, keyboard is None.
+    """
     overview_task = opensea_api.get_collection_overview(slug)
     eth_task = price_api.get_eth_price()
     (stats, collection_info, sales_data), eth_data = await asyncio.gather(overview_task, eth_task)
 
     if stats is None:
-        await message.reply_text("❌ Gagal mengambil data. Silakan coba lagi.")
-        return
-
+        return "❌ Gagal mengambil data. Silakan coba lagi.", None
     if isinstance(stats, dict) and "error" in stats:
-        await message.reply_text(f"❌ {stats['error']}")
-        return
+        return f"❌ {stats['error']}", None
 
     text = opensea_api.format_floor_price(
         stats,
@@ -1632,6 +1728,14 @@ async def send_floor_overview(message, collection_slug: str) -> None:
         [InlineKeyboardButton("📌 Watchlist", callback_data=f"qa_track_{slug}"),
          InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
     ])
+    return text, keyboard
+
+
+async def send_floor_overview(message, collection_slug: str) -> None:
+    """Send the rich floor/market overview for a collection slug."""
+    slug = collection_slug.lower().strip()
+    await message.reply_text(f"🔍 Mencari data untuk `{slug}`...", parse_mode=ParseMode.MARKDOWN)
+    text, keyboard = await _build_floor_overview(slug)
     await message.reply_text(
         text,
         parse_mode=ParseMode.MARKDOWN,
@@ -1723,18 +1827,10 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if want_offer:
         text = await _build_tracked_offers_text(collections)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
-             InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
+        keyboard = _check_keyboard(collections, "offer")
     else:
         text = await _build_tracked_floors_text(collections)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
-             InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
+        keyboard = _check_keyboard(collections, "floor")
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
