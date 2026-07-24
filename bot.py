@@ -171,19 +171,21 @@ def _format_watchlist(collections: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _format_tracked_floor_results(results: list[tuple[str, str, float | None, str, str | None]],
-                                  idr_rate: float = 0) -> str:
+def _format_tracked_price_results(results: list[tuple[str, str, float | None, str, str | None]],
+                                  idr_rate: float = 0,
+                                  title: str = "📊 *Tracked Floors*",
+                                  label: str = "Floor") -> str:
     lines = [
-        "📊 *Tracked Floors*",
+        title,
         f"{len(results)} koleksi dipantau",
         "",
     ]
-    for index, (slug, status, floor_price, symbol, error) in enumerate(results, 1):
+    for index, (slug, status, price, symbol, error) in enumerate(results, 1):
         display_slug = _escape_md_text(_compact_slug(slug))
-        if status == "ok" and floor_price is not None:
-            idr_text = f" • Rp {floor_price * idr_rate:,.0f}" if idr_rate else ""
+        if status == "ok" and price is not None:
+            idr_text = f" • Rp {price * idr_rate:,.0f}" if idr_rate else ""
             lines.append(f"{index}. *{display_slug}*")
-            lines.append(f"   Floor: *{floor_price:.4f} {symbol}*{idr_text}")
+            lines.append(f"   {label}: *{price:.4f} {symbol}*{idr_text}")
         else:
             safe_error = _escape_md_text(error or "Gagal mengambil data")
             lines.append(f"{index}. *{display_slug}*")
@@ -378,12 +380,13 @@ def price_menu_keyboard():
     """Sub-menu for price & tracking commands."""
     keyboard = [
         [InlineKeyboardButton("🔍 Cek 1 Koleksi", callback_data="cmd_floor"),
-         InlineKeyboardButton("📊 Cek Harga (watchlist)", callback_data="cmd_check")],
+         InlineKeyboardButton("📋 Watchlist (nama)", callback_data="cmd_list")],
+        [InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
+         InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
         [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
          InlineKeyboardButton("🗑 Untrack", callback_data="cmd_untrack")],
-        [InlineKeyboardButton("📋 Watchlist (nama)", callback_data="cmd_list"),
-         InlineKeyboardButton("💎 Volume", callback_data="cmd_volume")],
-        [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")],
+        [InlineKeyboardButton("💎 Volume", callback_data="cmd_volume"),
+         InlineKeyboardButton("⬅️ Kembali", callback_data="menu_main")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -510,7 +513,7 @@ PRICE_MENU_TEXT = (
     "📊 *Price & Tracking*\n"
     "Floor, watchlist, dan market snapshot\n\n"
     "📋 *Watchlist* — daftar nama koleksi (instan)\n"
-    "📊 *Cek Harga* — floor live semua watchlist\n"
+    "📊 *Cek Floor* / 🏷 *Cek Offer* — harga live watchlist\n"
     "📌 Track banyak: `/track azuki pudgypenguins`\n"
     "🔎 Cepat 1 koleksi: `.p slug`"
 )
@@ -688,8 +691,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         collections = db.get_tracked_collections(user_id)
         text = _format_watchlist(collections)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📌 Track Baru", callback_data="cmd_track"),
-             InlineKeyboardButton("📊 Cek Harga", callback_data="cmd_check")],
+            [InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
+             InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
+            [InlineKeyboardButton("📌 Track Baru", callback_data="cmd_track")],
             [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
@@ -705,12 +709,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ])
             await show(_format_watchlist(collections), keyboard)
             return
-        msg = await show("🔍 Mengambil data harga...")
+        msg = await show("🔍 Mengambil floor price...")
         text = await _build_tracked_floors_text(collections)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
-             InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list")],
-            [InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price"),
+             InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
+            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+        ])
+        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if data == "cmd_check_offer":
+        collections = db.get_tracked_collections(user_id)
+        if not collections:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
+                 InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price")]
+            ])
+            await show(_format_watchlist(collections), keyboard)
+            return
+        msg = await show("🏷 Mengambil top offer...")
+        text = await _build_tracked_offers_text(collections)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
+             InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check")],
+            [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
         ])
         await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -1372,7 +1396,7 @@ async def post_init(application: Application) -> None:
         BotCommand("track", "📌 Pantau koleksi (bisa banyak)"),
         BotCommand("untrack", "🗑 Hapus pantauan (bisa banyak)"),
         BotCommand("list", "📋 Daftar pantauan"),
-        BotCommand("check", "📊 Cek semua harga"),
+        BotCommand("check", "📊 Cek floor watchlist (/check offer utk offer)"),
         BotCommand("alert", "⚡ Set price alert"),
         BotCommand("palert", "📈 Set % alert"),
         BotCommand("valert", "📢 Set volume alert"),
@@ -1424,7 +1448,44 @@ async def _build_tracked_floors_text(collections: list[str]) -> str:
         else:
             error = stats.get("error") if isinstance(stats, dict) else None
             results.append((slug, "error", None, "ETH", error or "Gagal mengambil data"))
-    return _format_tracked_floor_results(results, idr_rate)
+    return _format_tracked_price_results(results, idr_rate,
+                                         title="📊 *Tracked Floors*", label="Floor")
+
+
+async def _fetch_offers_map(slugs: list[str]) -> dict:
+    """Fetch top collection offers for many slugs concurrently -> {slug: offer|None}."""
+    unique = list(dict.fromkeys(slugs))
+    if not unique:
+        return {}
+    results = await asyncio.gather(
+        *(opensea_api.get_top_collection_offer(slug) for slug in unique),
+        return_exceptions=True,
+    )
+    return {
+        slug: (res if isinstance(res, dict) else None)
+        for slug, res in zip(unique, results)
+    }
+
+
+async def _build_tracked_offers_text(collections: list[str]) -> str:
+    """Fetch all tracked top offers in parallel and format them."""
+    eth_data, offers_map = await asyncio.gather(
+        price_api.get_eth_price(),
+        _fetch_offers_map(collections),
+    )
+    idr_rate = eth_data.get("idr", 0) if eth_data and "error" not in eth_data else 0
+
+    results = []
+    for slug in collections:
+        offer = offers_map.get(slug)
+        if offer and "error" not in offer:
+            results.append((slug, "ok", offer.get("value", 0),
+                            offer.get("symbol", "WETH"), None))
+        else:
+            error = offer.get("error") if isinstance(offer, dict) else None
+            results.append((slug, "error", None, "WETH", error or "Belum ada offer"))
+    return _format_tracked_price_results(results, idr_rate,
+                                         title="🏷 *Tracked Top Offers*", label="Offer")
 
 
 async def _build_portfolio_text(portfolio: list) -> str:
@@ -1657,13 +1718,23 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    await update.message.reply_text("🔍 Mengambil data harga...")
+    want_offer = bool(context.args) and context.args[0].lower() in ("offer", "offers", "bid")
+    await update.message.reply_text("🏷 Mengambil top offer..." if want_offer else "🔍 Mengambil floor price...")
 
-    text = await _build_tracked_floors_text(collections)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-    ])
+    if want_offer:
+        text = await _build_tracked_offers_text(collections)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
+             InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+        ])
+    else:
+        text = await _build_tracked_floors_text(collections)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
+             InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+        ])
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
