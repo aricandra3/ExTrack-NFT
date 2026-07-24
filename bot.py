@@ -152,6 +152,59 @@ def _slug_code(slug: str, max_len: int = 26) -> str:
     return "`" + _compact_slug(slug, max_len).replace("`", "'") + "`"
 
 
+_ETH_AMOUNT_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*(?:eth)?\s*$", re.IGNORECASE)
+
+
+def _parse_eth_amount(text: str):
+    """Parse a bare ETH amount like '0.5', '2,5', or '1 eth'. Returns float or None."""
+    match = _ETH_AMOUNT_RE.match(text or "")
+    if not match:
+        return None
+    try:
+        value = float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _format_eth_conversion(amount: float, eth_data: dict) -> str:
+    usd_rate = eth_data.get("usd", 0) or 0
+    idr_rate = eth_data.get("idr", 0) or 0
+    return (
+        "💱 *ETH Converter*\n"
+        f"Amount: *{amount:g} ETH*\n\n"
+        "📊 *Result*\n"
+        f"🇺🇸 USD: *${amount * usd_rate:,.2f}*\n"
+        f"🇮🇩 IDR: *Rp {amount * idr_rate:,.0f}*\n\n"
+        f"💹 _1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
+    )
+
+
+def _convert_result_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Konversi Lagi", callback_data="cmd_convert"),
+         InlineKeyboardButton("💰 Harga ETH", callback_data="cmd_ethprice")],
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
+    ])
+
+
+async def _maybe_quick_convert(update) -> bool:
+    """If the message is a bare ETH amount, reply with USD/IDR. Returns True if handled."""
+    amount = _parse_eth_amount(update.message.text)
+    if amount is None:
+        return False
+    eth_data = await price_api.get_eth_price()
+    if not eth_data or "error" in eth_data:
+        await update.message.reply_text("❌ Gagal mengambil harga ETH. Coba lagi.")
+        return True
+    await update.message.reply_text(
+        _format_eth_conversion(amount, eth_data),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_convert_result_keyboard(),
+    )
+    return True
+
+
 def _format_watchlist(collections: list[str]) -> str:
     if not collections:
         return _format_empty_state(
@@ -474,36 +527,40 @@ def _alerts_overview_payload(user_id: int):
 MAX_WATCHLIST_BUTTONS = 40
 
 
-def _watchlist_number_rows(count: int, per_row: int = 5):
-    """Rows of numbered buttons (1..count) that open each collection's action menu."""
+def _check_cb(mode: str, sort: str) -> str:
+    """Callback data for a check view of the given mode + sort."""
+    base = "cmd_check_offer" if mode == "offer" else "cmd_check"
+    return base + ("_hi" if sort == "hi" else "")
+
+
+def _check_keyboard(ordered_items, mode: str = "floor", sort: str = "add"):
+    """Numbered per-collection buttons (keyed by stable row_id) + refresh,
+    floor↔offer toggle, sort toggle, and nav."""
     rows, row = [], []
-    for i in range(min(count, MAX_WATCHLIST_BUTTONS)):
-        row.append(InlineKeyboardButton(str(i + 1), callback_data=f"wlmenu_{i}"))
-        if len(row) == per_row:
+    for pos, (row_id, _slug) in enumerate(ordered_items[:MAX_WATCHLIST_BUTTONS]):
+        row.append(InlineKeyboardButton(str(pos + 1), callback_data=f"wlmenu_{row_id}"))
+        if len(row) == 5:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    return rows
 
-
-def _check_keyboard(collections, mode: str = "floor"):
-    """Numbered per-collection buttons + refresh / floor↔offer toggle / nav."""
-    rows = _watchlist_number_rows(len(collections))
-    if mode == "offer":
-        rows.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check_offer"),
-            InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data="cmd_check"),
-            InlineKeyboardButton("🏷 Cek Offer", callback_data="cmd_check_offer"),
-        ])
+    other_mode = "offer" if mode == "floor" else "floor"
+    toggle_label = "🏷 Cek Offer" if mode == "floor" else "📊 Cek Floor"
     rows.append([
-        InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
-        InlineKeyboardButton("🏠 Menu", callback_data="menu_main"),
+        InlineKeyboardButton("🔄 Refresh", callback_data=_check_cb(mode, sort)),
+        InlineKeyboardButton(toggle_label, callback_data=_check_cb(other_mode, sort)),
     ])
+
+    if sort == "hi":
+        sort_btn = InlineKeyboardButton("↕️ Urut Track", callback_data=_check_cb(mode, "add"))
+    else:
+        sort_btn = InlineKeyboardButton("⬇️ Termahal", callback_data=_check_cb(mode, "hi"))
+    rows.append([
+        sort_btn,
+        InlineKeyboardButton("📋 Watchlist", callback_data="cmd_list"),
+    ])
+    rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -594,7 +651,8 @@ CONVERTER_MENU_TEXT = (
     "💱 *ETH ↔ IDR Converter*\n"
     "Live ETH rate dan kalkulator cepat\n\n"
     "💰 Harga ETH sekarang\n"
-    "🔄 Konversi jumlah ETH ke fiat"
+    "🔄 Konversi jumlah ETH ke fiat\n\n"
+    "_Tip: kirim angka saja, mis._ `0.5` _atau_ `2,5`"
 )
 
 HELP_TEXT = (
@@ -604,6 +662,7 @@ HELP_TEXT = (
     "📌 Track (banyak): `/track slug1 slug2 ...`\n"
     "🔔 Alert: `/alert slug price`\n"
     "🏷 Offer alert: `/alert slug price above offer`\n"
+    "💱 Convert: ketik angka ETH saja (mis. `0.5`)\n"
     "📎 Alias: `.alias pendek slug-asli`\n\n"
     "Slug ada di URL OpenSea, contoh:\n"
     "`opensea.io/collection/boredapeyachtclub`"
@@ -741,63 +800,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await show(text, keyboard)
         return
 
-    if data == "cmd_check":
-        collections = db.get_tracked_collections(user_id)
-        if not collections:
+    if data in ("cmd_check", "cmd_check_hi", "cmd_check_offer", "cmd_check_offer_hi"):
+        mode = "offer" if "offer" in data else "floor"
+        sort = "hi" if data.endswith("_hi") else "add"
+        if not db.get_tracked_collections(user_id):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
                  InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price")]
             ])
-            await show(_format_watchlist(collections), keyboard)
+            await show(_format_watchlist([]), keyboard)
             return
-        msg = await show("🔍 Mengambil floor price...")
-        text = await _build_tracked_floors_text(collections)
+        msg = await show("🏷 Mengambil top offer..." if mode == "offer" else "🔍 Mengambil floor price...")
+        text, ordered_items = await _build_check(user_id, mode, sort)
         await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=_check_keyboard(collections, "floor"))
+                            reply_markup=_check_keyboard(ordered_items, mode, sort))
         return
 
-    if data == "cmd_check_offer":
-        collections = db.get_tracked_collections(user_id)
-        if not collections:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Track", callback_data="cmd_track"),
-                 InlineKeyboardButton("⬅️ Kembali", callback_data="menu_price")]
-            ])
-            await show(_format_watchlist(collections), keyboard)
-            return
-        msg = await show("🏷 Mengambil top offer...")
-        text = await _build_tracked_offers_text(collections)
-        await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=_check_keyboard(collections, "offer"))
-        return
-
-    # ---- Per-collection actions from the numbered watchlist buttons ----
+    # ---- Per-collection actions from the numbered watchlist buttons (by row id) ----
     if data.startswith(("wlmenu_", "wldetail_", "wlfloor_", "wloffer_", "wluntrack_")):
         try:
-            action, idx_str = data.rsplit("_", 1)
-            idx = int(idx_str)
+            action, id_str = data.rsplit("_", 1)
+            row_id = int(id_str)
         except (ValueError, IndexError):
-            action, idx = None, -1
-        collections = db.get_tracked_collections(user_id)
-        if not (0 <= idx < len(collections)):
+            action, row_id = None, -1
+        slug = db.get_tracked_slug_by_id(user_id, row_id) if row_id >= 0 else None
+        if slug is None:
             await show(
-                "⚠️ Koleksi tidak ditemukan (daftar mungkin berubah).",
+                "⚠️ Koleksi tidak ditemukan (mungkin sudah di-untrack).",
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("📊 Cek Floor", callback_data="cmd_check"),
                     InlineKeyboardButton("🏠 Menu", callback_data="menu_main"),
                 ]])
             )
             return
-        slug = collections[idx]
 
         if action == "wlmenu":
             await show(
                 f"📦 *{_slug_code(slug, 40)}*\n\nPilih aksi:",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔍 Detail", callback_data=f"wldetail_{idx}")],
-                    [InlineKeyboardButton("💰 Floor Alert", callback_data=f"wlfloor_{idx}"),
-                     InlineKeyboardButton("🏷 Offer Alert", callback_data=f"wloffer_{idx}")],
-                    [InlineKeyboardButton("🗑 Untrack", callback_data=f"wluntrack_{idx}")],
+                    [InlineKeyboardButton("🔍 Detail", callback_data=f"wldetail_{row_id}")],
+                    [InlineKeyboardButton("💰 Floor Alert", callback_data=f"wlfloor_{row_id}"),
+                     InlineKeyboardButton("🏷 Offer Alert", callback_data=f"wloffer_{row_id}")],
+                    [InlineKeyboardButton("🗑 Untrack", callback_data=f"wluntrack_{row_id}")],
                     [InlineKeyboardButton("⬅️ Ke Daftar", callback_data="cmd_check"),
                      InlineKeyboardButton("🏠 Menu", callback_data="menu_main")],
                 ])
@@ -978,6 +1022,8 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle text input for pending actions from menu buttons."""
     action = context.user_data.pop("pending_action", None)
     if not action:
+        # No menu action pending — a bare ETH amount becomes a quick conversion.
+        await _maybe_quick_convert(update)
         return
 
     text = update.message.text.strip()
@@ -987,9 +1033,8 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # ---- ETH Converter ----
     if action == "convert":
-        try:
-            eth_amount = float(text.split()[0])
-        except (ValueError, IndexError):
+        amount = _parse_eth_amount(text)
+        if amount is None:
             await update.message.reply_text(
                 "❌ Masukkan jumlah ETH berupa angka.\n_Contoh:_ `0.5`",
                 parse_mode=ParseMode.MARKDOWN
@@ -1000,24 +1045,11 @@ async def pending_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             error_msg = eth_data.get("error", "Gagal mengambil data") if eth_data else "Gagal mengambil data"
             await update.message.reply_text(f"❌ {error_msg}")
             return
-        usd_rate = eth_data.get("usd", 0)
-        idr_rate = eth_data.get("idr", 0)
-        usd_value = eth_amount * usd_rate
-        idr_value = eth_amount * idr_rate
-        msg = (
-            f"💱 *ETH Converter*\n"
-            f"Amount: *{eth_amount} ETH*\n\n"
-            f"📊 *Result*\n"
-            f"🇺🇸 USD: *${usd_value:,.2f}*\n"
-            f"🇮🇩 IDR: *Rp {idr_value:,.0f}*\n\n"
-            f"💹 _1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
+        await update.message.reply_text(
+            _format_eth_conversion(amount, eth_data),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_convert_result_keyboard(),
         )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Konversi Lagi", callback_data="cmd_convert"),
-             InlineKeyboardButton("💰 Harga ETH", callback_data="cmd_ethprice")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]
-        ])
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
     # ---- Single-arg commands ----
@@ -1529,28 +1561,6 @@ async def _fetch_stats_map(slugs: list[str]) -> dict:
     }
 
 
-async def _build_tracked_floors_text(collections: list[str]) -> str:
-    """Fetch all tracked floors in parallel and format them."""
-    eth_data, stats_map = await asyncio.gather(
-        price_api.get_eth_price(),
-        _fetch_stats_map(collections),
-    )
-    idr_rate = eth_data.get("idr", 0) if eth_data and "error" not in eth_data else 0
-
-    results = []
-    for slug in collections:
-        stats = stats_map.get(slug)
-        if stats and "error" not in stats:
-            total = stats.get("total", {})
-            results.append((slug, "ok", total.get("floor_price", 0),
-                            total.get("floor_price_symbol", "ETH"), None))
-        else:
-            error = stats.get("error") if isinstance(stats, dict) else None
-            results.append((slug, "error", None, "ETH", error or "Gagal mengambil data"))
-    return _format_tracked_price_results(results, idr_rate,
-                                         title="📊 *Tracked Floors*", label="Floor")
-
-
 async def _fetch_offers_map(slugs: list[str]) -> dict:
     """Fetch top collection offers for many slugs concurrently -> {slug: offer|None}."""
     unique = list(dict.fromkeys(slugs))
@@ -1566,25 +1576,55 @@ async def _fetch_offers_map(slugs: list[str]) -> dict:
     }
 
 
-async def _build_tracked_offers_text(collections: list[str]) -> str:
-    """Fetch all tracked top offers in parallel and format them."""
-    eth_data, offers_map = await asyncio.gather(
-        price_api.get_eth_price(),
-        _fetch_offers_map(collections),
-    )
+async def _build_check(user_id: int, mode: str = "floor", sort: str = "add"):
+    """Fetch tracked prices in parallel for the check view.
+
+    mode: 'floor' | 'offer'. sort: 'add' (insertion order) | 'hi' (price high→low).
+    Returns (text, ordered_items) where ordered_items = [(row_id, slug), ...] in the
+    same order as the numbered list, so buttons (keyed by stable row_id) line up.
+    Returns (None, []) when the watchlist is empty.
+    """
+    items = db.get_tracked_with_ids(user_id)
+    if not items:
+        return None, []
+
+    slugs = [slug for _, slug in items]
+    fetch = _fetch_offers_map(slugs) if mode == "offer" else _fetch_stats_map(slugs)
+    eth_data, price_map = await asyncio.gather(price_api.get_eth_price(), fetch)
     idr_rate = eth_data.get("idr", 0) if eth_data and "error" not in eth_data else 0
 
-    results = []
-    for slug in collections:
-        offer = offers_map.get(slug)
-        if offer and "error" not in offer:
-            results.append((slug, "ok", offer.get("value", 0),
-                            offer.get("symbol", "WETH"), None))
+    rows = []  # [row_id, slug, status, price, symbol, error]
+    for row_id, slug in items:
+        data = price_map.get(slug)
+        if mode == "offer":
+            if data and "error" not in data:
+                rows.append([row_id, slug, "ok", data.get("value", 0), data.get("symbol", "WETH"), None])
+            else:
+                err = data.get("error") if isinstance(data, dict) else None
+                rows.append([row_id, slug, "error", None, "WETH", err or "Belum ada offer"])
         else:
-            error = offer.get("error") if isinstance(offer, dict) else None
-            results.append((slug, "error", None, "WETH", error or "Belum ada offer"))
-    return _format_tracked_price_results(results, idr_rate,
-                                         title="🏷 *Tracked Top Offers*", label="Offer")
+            if data and "error" not in data:
+                total = data.get("total", {})
+                rows.append([row_id, slug, "ok", total.get("floor_price", 0),
+                             total.get("floor_price_symbol", "ETH"), None])
+            else:
+                err = data.get("error") if isinstance(data, dict) else None
+                rows.append([row_id, slug, "error", None, "ETH", err or "Gagal mengambil data"])
+
+    if sort == "hi":
+        # Priced rows first (highest price first); un-priced/error rows sink to the bottom.
+        rows.sort(key=lambda r: (r[2] == "ok", r[3] or 0), reverse=True)
+
+    label = "Offer" if mode == "offer" else "Floor"
+    title = "🏷 *Tracked Top Offers*" if mode == "offer" else "📊 *Tracked Floors*"
+    if sort == "hi":
+        title += " · termahal"
+    text = _format_tracked_price_results(
+        [(r[1], r[2], r[3], r[4], r[5]) for r in rows],
+        idr_rate, title=title, label=label,
+    )
+    ordered_items = [(r[0], r[1]) for r in rows]
+    return text, ordered_items
 
 
 async def _build_portfolio_text(portfolio: list) -> str:
@@ -1822,16 +1862,16 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    want_offer = bool(context.args) and context.args[0].lower() in ("offer", "offers", "bid")
-    await update.message.reply_text("🏷 Mengambil top offer..." if want_offer else "🔍 Mengambil floor price...")
+    args = [a.lower() for a in context.args]
+    mode = "offer" if any(a in ("offer", "offers", "bid") for a in args) else "floor"
+    sort = "hi" if any(a in ("hi", "high", "termahal", "desc", "mahal") for a in args) else "add"
+    await update.message.reply_text("🏷 Mengambil top offer..." if mode == "offer" else "🔍 Mengambil floor price...")
 
-    if want_offer:
-        text = await _build_tracked_offers_text(collections)
-        keyboard = _check_keyboard(collections, "offer")
-    else:
-        text = await _build_tracked_floors_text(collections)
-        keyboard = _check_keyboard(collections, "floor")
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    text, ordered_items = await _build_check(user_id, mode, sort)
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_check_keyboard(ordered_items, mode, sort),
+    )
 
 
 async def alert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2185,18 +2225,14 @@ async def ethprice_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Convert ETH amount to USD and IDR."""
-    if not context.args:
+    amount = _parse_eth_amount(" ".join(context.args)) if context.args else None
+    if amount is None:
         await update.message.reply_text(
             "❌ Format: `/convert <jumlah_eth>`\n"
-            "Contoh: `/convert 0.5`",
+            "Contoh: `/convert 0.5`\n\n"
+            "_Tip: kirim angka saja (mis._ `0.5`_) tanpa perintah juga bisa._",
             parse_mode=ParseMode.MARKDOWN
         )
-        return
-
-    try:
-        eth_amount = float(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Jumlah ETH harus berupa angka.")
         return
 
     eth_data = await price_api.get_eth_price()
@@ -2205,20 +2241,11 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"❌ {error_msg}")
         return
 
-    usd_rate = eth_data.get("usd", 0)
-    idr_rate = eth_data.get("idr", 0)
-    usd_value = eth_amount * usd_rate
-    idr_value = eth_amount * idr_rate
-
-    message = (
-        f"💱 *ETH Converter*\n"
-        f"Amount: *{eth_amount} ETH*\n\n"
-        f"📊 *Result*\n"
-        f"🇺🇸 USD: *${usd_value:,.2f}*\n"
-        f"🇮🇩 IDR: *Rp {idr_value:,.0f}*\n\n"
-        f"💹 _1 ETH = ${usd_rate:,.2f} / Rp {idr_rate:,.0f}_"
+    await update.message.reply_text(
+        _format_eth_conversion(amount, eth_data),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_convert_result_keyboard(),
     )
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 
 # ============== Gas Commands ==============

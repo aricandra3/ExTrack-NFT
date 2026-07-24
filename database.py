@@ -317,6 +317,30 @@ class Database:
 
         return collections
 
+    def get_tracked_with_ids(self, user_id: int) -> List[Tuple]:
+        """Return [(row_id, slug), ...] for a user, ordered by insertion (stable)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, collection_slug FROM tracked_collections WHERE user_id = ? ORDER BY id",
+            (user_id,)
+        )
+        rows = [(row[0], row[1]) for row in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def get_tracked_slug_by_id(self, user_id: int, row_id: int) -> Optional[str]:
+        """Resolve a tracked collection's slug by its stable row id (or None)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT collection_slug FROM tracked_collections WHERE id = ? AND user_id = ?",
+            (row_id, user_id)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
     def get_all_tracked_collections(self) -> List[Tuple[int, str]]:
         """Get all tracked collections with user IDs"""
         conn = self._get_connection()
