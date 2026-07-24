@@ -309,7 +309,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT collection_slug FROM tracked_collections WHERE user_id = ?",
+            "SELECT collection_slug FROM tracked_collections WHERE user_id = ? ORDER BY id",
             (user_id,)
         )
         collections = [row[0] for row in cursor.fetchall()]
